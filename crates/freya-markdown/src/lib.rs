@@ -4,7 +4,7 @@ use std::{
 };
 
 #[cfg(feature = "remote-asset")]
-use freya_components::Uri;
+use freya_components::Url;
 #[cfg(feature = "remote-asset")]
 use freya_components::image_viewer::ImageViewer;
 #[cfg(feature = "router")]
@@ -713,7 +713,7 @@ fn render_list(
 /// Render a markdown image.
 #[cfg(feature = "remote-asset")]
 fn render_image(url: &str, alt: &str, text_color: Color) -> Element {
-    match url.parse::<Uri>() {
+    match url.parse::<Url>() {
         Ok(uri) => ImageViewer::new(uri)
             .a11y_alt(alt)
             .aspect_ratio(AspectRatio::Fit)

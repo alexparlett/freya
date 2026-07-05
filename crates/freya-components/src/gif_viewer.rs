@@ -48,10 +48,12 @@ use freya_engine::prelude::{
     raster_n32_premul,
 };
 use gif::DisposalMethod;
-use torin::prelude::Size2D;
 #[cfg(feature = "remote-asset")]
-use ureq::http::Uri;
+use reqwest::Url;
+use torin::prelude::Size2D;
 
+#[cfg(feature = "remote-asset")]
+use crate::http::Http;
 use crate::{
     cache::*,
     loader::CircularLoader,
@@ -97,7 +99,7 @@ pub enum GifSource {
     ///
     /// Requires the `remote-asset` feature.
     #[cfg(feature = "remote-asset")]
-    Uri(Uri),
+    Uri(Url),
 
     Path(PathBuf),
 
@@ -129,8 +131,8 @@ impl<const N: usize> From<(&'static str, &'static [u8; N])> for GifSource {
 }
 
 #[cfg(feature = "remote-asset")]
-impl From<Uri> for GifSource {
-    fn from(uri: Uri) -> Self {
+impl From<Url> for GifSource {
+    fn from(uri: Url) -> Self {
         Self::Uri(uri)
     }
 }
@@ -138,7 +140,7 @@ impl From<Uri> for GifSource {
 #[cfg(feature = "remote-asset")]
 impl From<&'static str> for GifSource {
     fn from(src: &'static str) -> Self {
-        Self::Uri(Uri::from_static(src))
+        Self::Uri(Url::parse(src).expect("Invalid URL"))
     }
 }
 
@@ -162,14 +164,12 @@ impl Hash for GifSource {
 impl GifSource {
     pub async fn bytes(&self) -> anyhow::Result<Bytes> {
         let source = self.clone();
+        #[cfg(feature = "remote-asset")]
+        let client = Http::get();
         blocking::unblock(move || {
             let bytes = match source {
                 #[cfg(feature = "remote-asset")]
-                Self::Uri(uri) => ureq::get(uri)
-                    .call()?
-                    .body_mut()
-                    .read_to_vec()
-                    .map(Bytes::from)?,
+                Self::Uri(uri) => client.get(uri).send()?.error_for_status()?.bytes()?,
                 Self::Path(path) => fs::read(path).map(Bytes::from)?,
                 Self::Bytes(_, bytes) => bytes,
             };
