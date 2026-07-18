@@ -86,7 +86,7 @@ impl Component for Home {
                                 rect()
                                     .direction(Direction::Horizontal)
                                     .spacing(10.0)
-                                    .child(Link::new("https://docs.rs/freya/latest/freya/_docs/introduction/index.html")
+                                    .child(Link::new("https://docs.rs/freya/latest/freya/")
                                         .child(Button::new()
                                             .padding((10., 24.))
                                             .background((14, 165, 233))
