@@ -296,15 +296,20 @@ impl ScrollController {
 }
 
 /// The signed distance to add to the scroll offset on one axis to reveal `[item_min, item_max]`
-/// within `[vp_min, vp_max]`. Zero when already visible. An item longer than the viewport aligns to
-/// its start (and then reports zero), so repeated calls settle instead of oscillating start↔end.
+/// within `[vp_min, vp_max]`. Only a *clipped* item moves: if the item sits anywhere inside the
+/// visible span — hugging the start, hugging the end, or covering the whole viewport — it's a no-op.
+/// A clipped item is pulled in by the minimum amount (aligning the offending edge). The covering
+/// case (item wider than the viewport, spanning it) is caught first, so an over-large item settles
+/// once its edge is reached instead of oscillating start↔end.
 fn reveal_delta(item_min: f32, item_max: f32, vp_min: f32, vp_max: f32) -> f32 {
-    if (item_max - item_min) >= (vp_max - vp_min) || item_min < vp_min {
-        vp_min - item_min
+    if item_min <= vp_min && item_max >= vp_max {
+        0.0 // item already covers the viewport — visible
+    } else if item_min < vp_min {
+        vp_min - item_min // clipped at the start edge → pull it in
     } else if item_max > vp_max {
-        vp_max - item_max
+        vp_max - item_max // clipped at the end edge → pull it in
     } else {
-        0.0
+        0.0 // fully inside the viewport
     }
 }
 
