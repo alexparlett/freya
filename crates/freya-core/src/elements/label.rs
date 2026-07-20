@@ -101,6 +101,7 @@ pub struct LabelElement {
     pub event_handlers: FxHashMap<EventName, EventHandlerType>,
     pub max_lines: Option<usize>,
     pub line_height: Option<f32>,
+    pub letter_spacing: Option<f32>,
     pub relative_layer: Layer,
 }
 
@@ -116,6 +117,7 @@ impl Default for LabelElement {
             event_handlers: Default::default(),
             max_lines: None,
             line_height: None,
+            letter_spacing: None,
             relative_layer: Layer::default(),
         }
     }
@@ -151,6 +153,7 @@ impl ElementExt for LabelElement {
 
         if self.text_style_data != label.text_style_data
             || self.line_height != label.line_height
+            || self.letter_spacing != label.letter_spacing
             || self.max_lines != label.max_lines
         {
             diff.insert(DiffModifies::TEXT_STYLE);
@@ -205,6 +208,7 @@ impl ElementExt for LabelElement {
             spans: &[Span::new(&*self.text)],
             max_lines: None,
             line_height: None,
+            letter_spacing: None,
             width: context.area_size.width,
         };
         let paragraph = context
@@ -241,6 +245,10 @@ impl ElementExt for LabelElement {
 
                 if let Some(line_height) = self.line_height {
                     text_style.set_height_override(true).set_height(line_height);
+                }
+
+                if let Some(letter_spacing) = self.letter_spacing {
+                    text_style.set_letter_spacing(letter_spacing * context.scale_factor as f32);
                 }
 
                 for text_shadow in context.text_style_state.text_shadows.iter() {
@@ -382,6 +390,13 @@ impl Label {
     /// Override the height of each line as a multiple of the font size. Pass `None` for the default.
     pub fn line_height(mut self, line_height: impl Into<Option<f32>>) -> Self {
         self.element.line_height = line_height.into();
+        self
+    }
+
+    /// Extra spacing (in pixels, scaled by the device factor) inserted between glyphs. Pass `None`
+    /// for the default (0 — no extra tracking).
+    pub fn letter_spacing(mut self, letter_spacing: impl Into<Option<f32>>) -> Self {
+        self.element.letter_spacing = letter_spacing.into();
         self
     }
 }

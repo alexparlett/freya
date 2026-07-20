@@ -163,6 +163,52 @@ fn inline_element_beyond_max_lines_is_hidden() {
 }
 
 #[test]
+fn letter_spacing_widens_a_label() {
+    fn plain() -> impl IntoElement {
+        label().text("iiiiiiiiii")
+    }
+    fn spaced() -> impl IntoElement {
+        label().text("iiiiiiiiii").letter_spacing(6.0_f32)
+    }
+
+    let plain = find_label_area(&launch(plain), "iiiiiiiiii").expect("plain label should be in the tree");
+    let spaced = find_label_area(&launch(spaced), "iiiiiiiiii").expect("spaced label should be in the tree");
+
+    // 10 glyphs → 9 gaps of extra tracking, so the label box must grow well past any font wobble.
+    assert!(
+        spaced.width() > plain.width() + 30.0,
+        "letter_spacing should widen the label: plain {} vs spaced {}",
+        plain.width(),
+        spaced.width(),
+    );
+}
+
+#[test]
+fn letter_spacing_widens_a_paragraph() {
+    fn plain() -> impl IntoElement {
+        paragraph().span("iiiiiiiiii")
+    }
+    fn spaced() -> impl IntoElement {
+        paragraph().span("iiiiiiiiii").letter_spacing(6.0_f32)
+    }
+
+    fn width(test: &TestingRunner) -> f32 {
+        test.find(|node, element| Paragraph::try_downcast(element).map(|_| node.layout().area))
+            .expect("paragraph should be in the tree")
+            .width()
+    }
+
+    let plain = width(&launch(plain));
+    let spaced = width(&launch(spaced));
+    assert!(
+        spaced > plain + 30.0,
+        "letter_spacing should widen the paragraph: plain {} vs spaced {}",
+        plain,
+        spaced,
+    );
+}
+
+#[test]
 fn inline_element_respects_paragraph_margin() {
     fn app() -> impl IntoElement {
         paragraph().margin(20.).span("Before ").child(

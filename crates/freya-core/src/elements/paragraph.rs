@@ -161,6 +161,7 @@ pub struct ParagraphElement {
     pub cursor_style: CursorStyle,
     pub cursor_mode: CursorMode,
     pub vertical_align: VerticalAlign,
+    pub letter_spacing: Option<f32>,
 }
 
 impl Default for ParagraphElement {
@@ -184,6 +185,7 @@ impl Default for ParagraphElement {
             cursor_style: CursorStyle::default(),
             cursor_mode: CursorMode::default(),
             vertical_align: VerticalAlign::default(),
+            letter_spacing: Default::default(),
         }
     }
 }
@@ -251,6 +253,7 @@ impl ElementExt for ParagraphElement {
 
         if self.text_style_data != paragraph.text_style_data
             || self.line_height != paragraph.line_height
+            || self.letter_spacing != paragraph.letter_spacing
             || self.max_lines != paragraph.max_lines
         {
             diff.insert(DiffModifies::TEXT_STYLE);
@@ -298,6 +301,7 @@ impl ElementExt for ParagraphElement {
             spans: &self.spans,
             max_lines: self.max_lines,
             line_height: self.line_height,
+            letter_spacing: self.letter_spacing,
             width: context.area_size.width,
         };
         let paragraph = context
@@ -666,6 +670,7 @@ impl ParagraphElement {
             fallback_fonts,
             scale_factor,
             self.line_height,
+            self.letter_spacing,
         ));
         paragraph_style.set_max_lines(self.max_lines);
         paragraph_style.set_text_align(text_style_state.text_align.into());
@@ -684,6 +689,7 @@ impl ParagraphElement {
                         scale_factor,
                         span,
                         self.line_height,
+                        self.letter_spacing,
                     ));
                     paragraph_builder.add_text(&span.text);
                 }
@@ -735,6 +741,7 @@ fn base_text_style(
     fallback_fonts: &[Cow<'static, str>],
     scale_factor: f64,
     line_height: Option<f32>,
+    letter_spacing: Option<f32>,
 ) -> TextStyle {
     let mut text_style = TextStyle::default();
 
@@ -760,6 +767,10 @@ fn base_text_style(
         text_style.set_height(line_height);
     }
 
+    if let Some(letter_spacing) = letter_spacing {
+        text_style.set_letter_spacing(letter_spacing * scale_factor as f32);
+    }
+
     for text_shadow in text_style_state.text_shadows.iter() {
         text_style.add_shadow((*text_shadow).into());
     }
@@ -774,6 +785,7 @@ fn span_text_style(
     scale_factor: f64,
     span: &Span,
     line_height: Option<f32>,
+    letter_spacing: Option<f32>,
 ) -> TextStyle {
     let span_style = TextStyleState::from_data(text_style_state, &span.text_style_data);
     let mut text_style = TextStyle::new();
@@ -796,6 +808,9 @@ fn span_text_style(
     if let Some(line_height) = line_height {
         text_style.set_height_override(true);
         text_style.set_height(line_height);
+    }
+    if let Some(letter_spacing) = letter_spacing {
+        text_style.set_letter_spacing(letter_spacing * scale_factor as f32);
     }
     text_style
 }
@@ -983,6 +998,13 @@ impl Paragraph {
     /// Override the height of each line as a multiple of the font size. Pass `None` for the default.
     pub fn line_height(mut self, line_height: impl Into<Option<f32>>) -> Self {
         self.element.line_height = line_height.into();
+        self
+    }
+
+    /// Extra spacing (in pixels, scaled by the device factor) inserted between glyphs. Pass `None`
+    /// for the default (0 — no extra tracking).
+    pub fn letter_spacing(mut self, letter_spacing: impl Into<Option<f32>>) -> Self {
+        self.element.letter_spacing = letter_spacing.into();
         self
     }
 

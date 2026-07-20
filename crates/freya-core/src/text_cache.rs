@@ -14,6 +14,7 @@ pub struct CachedParagraph<'a> {
     pub spans: &'a [Span<'a>],
     pub max_lines: Option<usize>,
     pub line_height: Option<f32>,
+    pub letter_spacing: Option<f32>,
     pub width: f32,
 }
 
@@ -23,6 +24,9 @@ impl Hash for CachedParagraph<'_> {
         self.spans.hash(state);
         self.max_lines.hash(state);
         if let Some(v) = self.line_height {
+            v.to_bits().hash(state)
+        }
+        if let Some(v) = self.letter_spacing {
             v.to_bits().hash(state)
         }
         self.width.to_bits().hash(state);
