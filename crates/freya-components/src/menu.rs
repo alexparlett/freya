@@ -106,6 +106,8 @@ pub struct Menu {
     pub(crate) theme: Option<MenuContainerThemePartial>,
     children: Vec<Element>,
     on_close: Option<EventHandler<()>>,
+    min_width: Option<Size>,
+    min_height: Option<Size>,
     key: DiffKey,
 }
 
@@ -136,6 +138,18 @@ impl Menu {
 
     pub fn theme(mut self, theme: MenuContainerThemePartial) -> Self {
         self.theme = Some(theme);
+        self
+    }
+
+    /// A minimum width for the menu's container, so short items don't collapse / wrap.
+    pub fn min_width(mut self, min_width: impl Into<Size>) -> Self {
+        self.min_width = Some(min_width.into());
+        self
+    }
+
+    /// A minimum height for the menu's container.
+    pub fn min_height(mut self, min_height: impl Into<Size>) -> Self {
+        self.min_height = Some(min_height.into());
         self
     }
 }
@@ -192,6 +206,8 @@ impl ComponentOwned for Menu {
             .child(
                 MenuContainer::new()
                     .map(self.theme, |el, theme| el.theme(theme))
+                    .map(self.min_width, |el, w| el.min_width(w))
+                    .map(self.min_height, |el, h| el.min_height(h))
                     .children(self.children),
             )
     }
@@ -216,6 +232,8 @@ impl ComponentOwned for Menu {
 pub struct MenuContainer {
     pub(crate) theme: Option<MenuContainerThemePartial>,
     children: Vec<Element>,
+    min_width: Option<Size>,
+    min_height: Option<Size>,
     key: DiffKey,
 }
 
@@ -238,6 +256,18 @@ impl MenuContainer {
 
     pub fn theme(mut self, theme: MenuContainerThemePartial) -> Self {
         self.theme = Some(theme);
+        self
+    }
+
+    /// A minimum width for the container box.
+    pub fn min_width(mut self, min_width: impl Into<Size>) -> Self {
+        self.min_width = Some(min_width.into());
+        self
+    }
+
+    /// A minimum height for the container box.
+    pub fn min_height(mut self, min_height: impl Into<Size>) -> Self {
+        self.min_height = Some(min_height.into());
         self
     }
 }
@@ -283,6 +313,8 @@ impl ComponentOwned for MenuContainer {
                     .padding(theme.padding)
                     .border(Border::new().width(1.).fill(theme.border_fill))
                     .content(Content::fit())
+                    .map(self.min_width, |el, w| el.min_width(w))
+                    .map(self.min_height, |el, h| el.min_height(h))
                     .children(self.children),
             )
     }
