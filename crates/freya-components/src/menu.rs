@@ -150,6 +150,11 @@ impl ComponentOwned for Menu {
         // Provide this the ROOT Menu ID
         use_provide_context(|| ROOT_MENU);
 
+        // The menu's own laid-out area, so an outside-click can be told apart from a click on the
+        // menu's own content (e.g. a focusable `Input` inside it — whose press `stop_propagation`
+        // can't suppress this *global* handler, since the global press is a separate event).
+        let mut menu_area = use_state(Area::default);
+
         let on_close = self.on_close.clone();
         let on_global_key_down = move |e: Event<KeyboardEventData>| {
             if e.key == Key::Named(NamedKey::Escape) {
@@ -164,12 +169,23 @@ impl ComponentOwned for Menu {
         rect()
             .layer(Layer::Overlay)
             .corner_radius(8.0)
+            .on_sized(move |e: Event<SizedEventData>| menu_area.set(e.area))
             .on_press(move |ev: Event<PressEventData>| {
                 ev.stop_propagation();
             })
-            .on_global_pointer_press(move |_: Event<PointerEventData>| {
-                if let Some(on_close) = &self.on_close {
-                    on_close.call(());
+            .on_global_pointer_press(move |e: Event<PointerEventData>| {
+                // Close only when the press landed outside the menu's own bounds.
+                let p = e.data().global_location();
+                let a = *menu_area.read();
+                let (px, py) = (p.x as f32, p.y as f32);
+                let outside = px < a.origin.x
+                    || px > a.origin.x + a.size.width
+                    || py < a.origin.y
+                    || py > a.origin.y + a.size.height;
+                if outside {
+                    if let Some(on_close) = &self.on_close {
+                        on_close.call(());
+                    }
                 }
             })
             .on_global_key_down(on_global_key_down)
