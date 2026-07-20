@@ -202,8 +202,10 @@ fn register_base_component_themes(theme: &mut Theme) {
             background: Preference::Reference("surface_tertiary"),
             hover_background: Preference::Reference("surface_secondary"),
             border_fill: Preference::Reference("border"),
+            hover_border_fill: Preference::Reference("border"),
             focus_border_fill: Preference::Reference("border_focus"),
             color: Preference::Reference("text_primary"),
+            hover_color: Preference::Reference("text_primary"),
         },
     );
     theme.set(
@@ -212,8 +214,10 @@ fn register_base_component_themes(theme: &mut Theme) {
             background: Preference::Reference("primary"),
             hover_background: Preference::Reference("tertiary"),
             border_fill: Preference::Specific(Color::TRANSPARENT),
+            hover_border_fill: Preference::Specific(Color::TRANSPARENT),
             focus_border_fill: Preference::Reference("secondary"),
             color: Preference::Reference("text_inverse"),
+            hover_color: Preference::Reference("text_inverse"),
         },
     );
     theme.set(
@@ -222,8 +226,10 @@ fn register_base_component_themes(theme: &mut Theme) {
             background: Preference::Reference("surface_tertiary"),
             hover_background: Preference::Reference("surface_secondary"),
             border_fill: Preference::Reference("border"),
+            hover_border_fill: Preference::Reference("border"),
             focus_border_fill: Preference::Reference("secondary"),
             color: Preference::Reference("primary"),
+            hover_color: Preference::Reference("primary"),
         },
     );
     theme.set(
@@ -232,8 +238,10 @@ fn register_base_component_themes(theme: &mut Theme) {
             background: Preference::Specific(Color::TRANSPARENT),
             hover_background: Preference::Reference("surface_tertiary"),
             border_fill: Preference::Specific(Color::TRANSPARENT),
+            hover_border_fill: Preference::Specific(Color::TRANSPARENT),
             focus_border_fill: Preference::Reference("border"),
             color: Preference::Reference("text_primary"),
+            hover_color: Preference::Reference("text_primary"),
         },
     );
     theme.set(

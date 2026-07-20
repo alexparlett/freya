@@ -34,8 +34,10 @@ define_theme! {
         background: Color,
         hover_background: Color,
         border_fill: Color,
+        hover_border_fill: Color,
         focus_border_fill: Color,
         color: Color,
+        hover_color: Color,
     }
 }
 
@@ -328,21 +330,32 @@ impl Component for Button {
             ),
         };
 
+        let hovered = enabled() && hovering();
         let border = if focus() == Focus::Keyboard {
             Border::new()
                 .fill(theme_colors.focus_border_fill)
                 .width(2.)
                 .alignment(BorderAlignment::Inner)
         } else {
+            let fill = if hovered {
+                theme_colors.hover_border_fill
+            } else {
+                theme_colors.border_fill
+            };
             Border::new()
-                .fill(theme_colors.border_fill.mul_if(!self.enabled, 0.9))
+                .fill(fill.mul_if(!self.enabled, 0.9))
                 .width(1.)
                 .alignment(BorderAlignment::Inner)
         };
-        let background = if enabled() && hovering() {
+        let background = if hovered {
             theme_colors.hover_background
         } else {
             theme_colors.background
+        };
+        let color = if hovered {
+            theme_colors.hover_color
+        } else {
+            theme_colors.color
         };
 
         rect()
@@ -356,7 +369,7 @@ impl Component for Button {
             .corner_radius(theme_layout.corner_radius)
             .width(theme_layout.width)
             .height(theme_layout.height)
-            .color(theme_colors.color.mul_if(!self.enabled, 0.9))
+            .color(color.mul_if(!self.enabled, 0.9))
             .center()
             .maybe(self.enabled, |rect| {
                 rect.map(self.on_pointer_down.clone(), |rect, on_pointer_down| {
