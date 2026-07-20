@@ -1,5 +1,5 @@
 use freya_core::prelude::*;
-use torin::prelude::Direction;
+use torin::prelude::{Area, Direction};
 
 /// Where along an axis a scroll should land, the beginning or the end.
 #[derive(Default, PartialEq, Eq)]
@@ -136,6 +136,10 @@ pub struct ScrollController {
     requests: State<Vec<ScrollRequest>>,
     on_scroll: State<Callback<ScrollEvent, bool>>,
     get_scroll: State<Callback<(), (i32, i32)>>,
+    /// The scrollable's current viewport rectangle (window space), refreshed by the scrollable each
+    /// layout via [`set_viewport`](Self::set_viewport). Lets [`scroll_to_item`](Self::scroll_to_item)
+    /// reveal a target from its own measured rectangle without the caller knowing the viewport.
+    viewport: State<Area>,
 }
 
 impl From<ScrollController> for (i32, i32) {
@@ -165,6 +169,7 @@ impl ScrollController {
                 current != *scroll.read()
             })),
             get_scroll: State::create(Callback::new(move |_| *scroll.read())),
+            viewport: State::create(Area::default()),
         }
     }
     /// Builds a controller from externally owned state, letting the caller manage its storage.
@@ -179,6 +184,7 @@ impl ScrollController {
             requests,
             on_scroll,
             get_scroll,
+            viewport: State::create(Area::default()),
         }
     }
 
@@ -250,6 +256,55 @@ impl ScrollController {
             .write()
             .push(ScrollRequest::new(scroll_position, scroll_direction));
         self.notifier.write();
+    }
+
+    /// Records the scrollable's current viewport rectangle (window space). The scrollable calls this
+    /// every layout so [`scroll_to_item`](Self::scroll_to_item) can reveal a target against it.
+    pub fn set_viewport(&mut self, viewport: Area) {
+        self.viewport.set_if_modified(viewport);
+    }
+
+    /// Scrolls the minimum amount needed to bring `item` fully into view, on whichever axes it
+    /// overflows the viewport. `item` is the target's own measured window-space rectangle — e.g.
+    /// straight from an [`on_sized`](freya_core::prelude::EventHandlersExt::on_sized)
+    /// [`Area`](torin::prelude::Area) — so the caller never has to know the viewport or scroll
+    /// position. A no-op once the item is already visible, so it is safe to call every render (an
+    /// item larger than the viewport aligns to its start and stops, rather than oscillating).
+    pub fn scroll_to_item(&mut self, item: impl Into<Area>) {
+        let item = item.into();
+        let viewport = *self.viewport.read();
+        // Not laid out yet — nothing meaningful to reveal against.
+        if viewport.width() <= 0.0 || viewport.height() <= 0.0 {
+            return;
+        }
+        let (x, y) = self.get_scroll.read().call(());
+
+        let dx = reveal_delta(item.min_x(), item.max_x(), viewport.min_x(), viewport.max_x());
+        let dy = reveal_delta(item.min_y(), item.max_y(), viewport.min_y(), viewport.max_y());
+
+        if dx != 0.0 {
+            self.on_scroll
+                .write()
+                .call(ScrollEvent::X((x as f32 + dx).round() as i32));
+        }
+        if dy != 0.0 {
+            self.on_scroll
+                .write()
+                .call(ScrollEvent::Y((y as f32 + dy).round() as i32));
+        }
+    }
+}
+
+/// The signed distance to add to the scroll offset on one axis to reveal `[item_min, item_max]`
+/// within `[vp_min, vp_max]`. Zero when already visible. An item longer than the viewport aligns to
+/// its start (and then reports zero), so repeated calls settle instead of oscillating start↔end.
+fn reveal_delta(item_min: f32, item_max: f32, vp_min: f32, vp_max: f32) -> f32 {
+    if (item_max - item_min) >= (vp_max - vp_min) || item_min < vp_min {
+        vp_min - item_min
+    } else if item_max > vp_max {
+        vp_max - item_max
+    } else {
+        0.0
     }
 }
 

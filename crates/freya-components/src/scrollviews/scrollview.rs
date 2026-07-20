@@ -202,6 +202,10 @@ impl Component for ScrollView {
             size.read().inner_sizes.width,
             size.read().inner_sizes.height,
         );
+        // Publish the viewport rectangle so `ScrollController::scroll_to_item` can reveal a target
+        // from its own measured rectangle. `size.area` is the content box, which is fill-sized to the
+        // viewport (its own offset scrolls its children, not itself), so it's the fixed visible frame.
+        scroll_controller.set_viewport(size.read().area);
 
         let corrected_scrolled_x = get_corrected_scroll_position(
             size.read().inner_sizes.width,
