@@ -14,6 +14,19 @@ pub enum AttachedPosition {
     Right,
 }
 
+/// Cross-axis alignment of the attached element against the inner one. For `Top`/`Bottom` this is
+/// horizontal (the attached element's left / centre / right edge lines up with the inner element's);
+/// for `Left`/`Right` it's vertical. `Center` is the historical default; `End` gives corner anchoring
+/// (e.g. `Bottom` + `End` = the two right edges align, so the panel opens down-and-left — useful for a
+/// trigger near the right screen edge, so the panel doesn't overflow off-screen).
+#[derive(PartialEq, Clone, Copy, Debug, Default)]
+pub enum AttachedAlign {
+    Start,
+    #[default]
+    Center,
+    End,
+}
+
 /// A container that attaches elements to the top, bottom, left, or right of an inner element.
 ///
 /// Uses absolute positioning and measures the attached element's size
@@ -40,6 +53,7 @@ pub struct Attached {
     inner: Element,
     children: Vec<Element>,
     position: AttachedPosition,
+    align: AttachedAlign,
     key: DiffKey,
 }
 
@@ -61,6 +75,7 @@ impl Attached {
             inner: inner.into_element(),
             children: vec![],
             position: AttachedPosition::Bottom,
+            align: AttachedAlign::Center,
             key: DiffKey::None,
         }
     }
@@ -68,6 +83,23 @@ impl Attached {
     pub fn position(mut self, position: AttachedPosition) -> Self {
         self.position = position;
         self
+    }
+
+    /// Cross-axis alignment against the inner element (default [`AttachedAlign::Center`]).
+    pub fn align(mut self, align: AttachedAlign) -> Self {
+        self.align = align;
+        self
+    }
+
+    /// Align the attached element to the inner element's start edge (left for `Top`/`Bottom`).
+    pub fn align_start(self) -> Self {
+        self.align(AttachedAlign::Start)
+    }
+
+    /// Align the attached element to the inner element's end edge (right for `Top`/`Bottom`) — corner
+    /// anchoring, so a panel opens inward from a trigger near the screen edge.
+    pub fn align_end(self) -> Self {
+        self.align(AttachedAlign::End)
     }
 
     pub fn top(self) -> Self {
@@ -102,18 +134,28 @@ impl Component for Attached {
         let attached_width = attached.map(|a| a.width()).unwrap_or_default();
         let attached_height = attached.map(|a| a.height()).unwrap_or_default();
 
+        // Cross-axis offset (horizontal for Top/Bottom, vertical for Left/Right): where the attached
+        // element's start / centre / end edge lands against the inner element's span.
+        let align_offset = |inner_span: f32, attached_span: f32| match self.align {
+            AttachedAlign::Start => 0.,
+            AttachedAlign::Center => (inner_span - attached_span) / 2.,
+            AttachedAlign::End => inner_span - attached_span,
+        };
+        let cross_h = align_offset(inner_width, attached_width);
+        let cross_v = align_offset(inner_height, attached_height);
+
         let position = match self.position {
             AttachedPosition::Top => Position::new_absolute()
                 .top(-attached_height)
-                .left((inner_width - attached_width) / 2.),
+                .left(cross_h),
             AttachedPosition::Bottom => Position::new_absolute()
                 .top(inner_height)
-                .left((inner_width - attached_width) / 2.),
+                .left(cross_h),
             AttachedPosition::Left => Position::new_absolute()
-                .top((inner_height - attached_height) / 2.)
+                .top(cross_v)
                 .left(-attached_width),
             AttachedPosition::Right => Position::new_absolute()
-                .top((inner_height - attached_height) / 2.)
+                .top(cross_v)
                 .left(inner_width),
         };
 
