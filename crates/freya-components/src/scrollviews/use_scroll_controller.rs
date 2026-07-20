@@ -140,6 +140,11 @@ pub struct ScrollController {
     /// layout via [`set_viewport`](Self::set_viewport). Lets [`scroll_to_item`](Self::scroll_to_item)
     /// reveal a target from its own measured rectangle without the caller knowing the viewport.
     viewport: State<Area>,
+    /// The current scroll position, mirroring [`on_scroll`](Self::on_scroll)/[`get_scroll`](Self::get_scroll).
+    /// Held here so [`scroll_to_item`](Self::scroll_to_item) can *peek* it: that method is imperative,
+    /// so reading via `get_scroll` inside a reactive effect would subscribe the effect to the scroll
+    /// and loop it against its own write.
+    scroll: State<(i32, i32)>,
 }
 
 impl From<ScrollController> for (i32, i32) {
@@ -157,7 +162,10 @@ impl ScrollController {
             notifier: State::create(()),
             requests: State::create(initial_requests),
             on_scroll: State::create(Callback::new(move |ev| {
-                let current = *scroll.read();
+                // Peek, not read: this callback runs from `scroll_to_x`/`scroll_to_item`, which can be
+                // driven inside a reactive effect. Reading here would subscribe that effect to the
+                // scroll and loop it against this very write. Consumers subscribe via `get_scroll`.
+                let current = *scroll.peek();
                 match ev {
                     ScrollEvent::X(x) => {
                         scroll.write().0 = x;
@@ -166,10 +174,11 @@ impl ScrollController {
                         scroll.write().1 = y;
                     }
                 }
-                current != *scroll.read()
+                current != *scroll.peek()
             })),
             get_scroll: State::create(Callback::new(move |_| *scroll.read())),
             viewport: State::create(Area::default()),
+            scroll,
         }
     }
     /// Builds a controller from externally owned state, letting the caller manage its storage.
@@ -185,6 +194,7 @@ impl ScrollController {
             on_scroll,
             get_scroll,
             viewport: State::create(Area::default()),
+            scroll: State::create((0, 0)),
         }
     }
 
@@ -272,12 +282,14 @@ impl ScrollController {
     /// item larger than the viewport aligns to its start and stops, rather than oscillating).
     pub fn scroll_to_item(&mut self, item: impl Into<Area>) {
         let item = item.into();
-        let viewport = *self.viewport.read();
+        // Peek, never read: this is imperative. Reading inside a reactive effect would subscribe the
+        // effect to the viewport/scroll and loop it against the `on_scroll` write below.
+        let viewport = *self.viewport.peek();
         // Not laid out yet — nothing meaningful to reveal against.
         if viewport.width() <= 0.0 || viewport.height() <= 0.0 {
             return;
         }
-        let (x, y) = self.get_scroll.read().call(());
+        let (x, y) = *self.scroll.peek();
 
         let dx = reveal_delta(item.min_x(), item.max_x(), viewport.min_x(), viewport.max_x());
         let dy = reveal_delta(item.min_y(), item.max_y(), viewport.min_y(), viewport.max_y());
