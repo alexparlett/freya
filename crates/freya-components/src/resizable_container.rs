@@ -89,13 +89,26 @@ pub struct Panel {
     pub id: usize,
 }
 
-#[derive(Default)]
 pub struct ResizableContext {
     pub panels: Vec<Panel>,
     pub direction: Direction,
+    /// Thickness (px) of each resize handle between panels. Defaults to
+    /// [`HANDLE_SIZE`](Self::HANDLE_SIZE).
+    pub handle_size: f32,
+}
+
+impl Default for ResizableContext {
+    fn default() -> Self {
+        Self {
+            panels: Vec::new(),
+            direction: Direction::default(),
+            handle_size: Self::HANDLE_SIZE,
+        }
+    }
 }
 
 impl ResizableContext {
+    /// The default resize-handle thickness in pixels.
     pub const HANDLE_SIZE: f32 = 4.0;
 
     pub fn direction(&self) -> Direction {
@@ -170,7 +183,7 @@ impl ResizableContext {
         let mut changed_panels = false;
 
         // Precompute conversion factor between pixels and flex weight
-        let handle_space = self.panels.len().saturating_sub(1) as f32 * Self::HANDLE_SIZE;
+        let handle_space = self.panels.len().saturating_sub(1) as f32 * self.handle_size;
         let (px_total, flex_total) =
             self.panels
                 .iter()
@@ -254,6 +267,7 @@ pub struct ResizableContainer {
     direction: Direction,
     panels: Vec<ResizablePanel>,
     controller: Option<Writable<ResizableContext>>,
+    handle_size: f32,
 }
 
 impl Default for ResizableContainer {
@@ -268,11 +282,19 @@ impl ResizableContainer {
             direction: Direction::Vertical,
             panels: vec![],
             controller: None,
+            handle_size: ResizableContext::HANDLE_SIZE,
         }
     }
 
     pub fn direction(mut self, direction: Direction) -> Self {
         self.direction = direction;
+        self
+    }
+
+    /// Thickness (px) of the resize handles between panels. Defaults to `4.0`. (Ignored when an
+    /// external `controller` is supplied — set it on that [`ResizableContext`] instead.)
+    pub fn handle_size(mut self, handle_size: f32) -> Self {
+        self.handle_size = handle_size;
         self
     }
 
@@ -304,6 +326,7 @@ impl Component for ResizableContainer {
             self.controller.clone().unwrap_or_else(|| {
                 let mut state = State::create(ResizableContext {
                     direction: self.direction,
+                    handle_size: self.handle_size,
                     ..Default::default()
                 });
 
@@ -484,6 +507,7 @@ impl Component for ResizableHandle {
 
         let panel_index = self.panel_index;
         let direction = registry.read().direction;
+        let handle_px = registry.read().handle_size;
 
         use_drop(move || {
             if *status.peek() == HandleStatus::Hovering {
@@ -560,7 +584,7 @@ impl Component for ResizableHandle {
             }
         };
 
-        let handle_size = Size::px(ResizableContext::HANDLE_SIZE);
+        let handle_size = Size::px(handle_px);
         let (width, height) = match direction {
             Direction::Horizontal => (handle_size, Size::fill()),
             Direction::Vertical => (Size::fill(), handle_size),
