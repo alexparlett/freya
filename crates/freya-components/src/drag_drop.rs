@@ -46,6 +46,9 @@ pub struct DragZone<T: Clone + 'static + PartialEq> {
     show_while_dragging: bool,
     /// Minimum distance in pixels the cursor must move before dragging starts. Defaults to `4.0`.
     drag_threshold: f64,
+    /// Whether dragging is allowed. When `false` the zone renders its children normally but never arms
+    /// a drag. Defaults to `true`.
+    enabled: bool,
     key: DiffKey,
 }
 
@@ -63,6 +66,7 @@ impl<T: Clone + PartialEq + 'static> DragZone<T> {
             drag_element: None,
             show_while_dragging: true,
             drag_threshold: 4.0,
+            enabled: true,
             key: DiffKey::default(),
         }
     }
@@ -81,6 +85,13 @@ impl<T: Clone + PartialEq + 'static> DragZone<T> {
         self.drag_threshold = drag_threshold;
         self
     }
+
+    /// Enable or disable dragging. A disabled zone renders its children normally but never arms a
+    /// drag (its press is ignored). Defaults to `true`.
+    pub fn enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
 }
 
 impl<T: Clone + PartialEq> Component for DragZone<T> {
@@ -89,6 +100,7 @@ impl<T: Clone + PartialEq> Component for DragZone<T> {
         let mut phase = use_state(|| DragPhase::Idle);
         let data = self.data.clone();
         let drag_threshold = self.drag_threshold;
+        let enabled = self.enabled;
 
         let on_global_pointer_move = move |e: Event<PointerEventData>| match phase() {
             DragPhase::Dragging { offset, .. } => {
@@ -117,7 +129,7 @@ impl<T: Clone + PartialEq> Component for DragZone<T> {
         };
 
         let on_pointer_down = move |e: Event<PointerEventData>| {
-            if e.data().button() != Some(MouseButton::Left) {
+            if !enabled || e.data().button() != Some(MouseButton::Left) {
                 return;
             }
             phase.set(DragPhase::Pressing {
