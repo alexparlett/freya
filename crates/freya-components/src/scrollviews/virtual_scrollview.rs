@@ -86,6 +86,7 @@ pub struct VirtualScrollView<D, B: Fn(usize, &D) -> Element> {
     scroll_controller: Option<ScrollController>,
     invert_scroll_wheel: bool,
     drag_scrolling: bool,
+    wheel_axis_lock: Option<f32>,
     key: DiffKey,
 }
 
@@ -113,6 +114,7 @@ impl<D: PartialEq, B: Fn(usize, &D) -> Element> PartialEq for VirtualScrollView<
             && self.scroll_with_arrows == other.scroll_with_arrows
             && self.scroll_controller == other.scroll_controller
             && self.invert_scroll_wheel == other.invert_scroll_wheel
+            && self.wheel_axis_lock == other.wheel_axis_lock
     }
 }
 
@@ -135,6 +137,7 @@ impl<B: Fn(usize, &()) -> Element> VirtualScrollView<(), B> {
             scroll_controller: None,
             invert_scroll_wheel: false,
             drag_scrolling: true,
+            wheel_axis_lock: None,
             key: DiffKey::None,
         }
     }
@@ -157,6 +160,7 @@ impl<B: Fn(usize, &()) -> Element> VirtualScrollView<(), B> {
             scroll_controller: Some(scroll_controller),
             invert_scroll_wheel: false,
             drag_scrolling: true,
+            wheel_axis_lock: None,
             key: DiffKey::None,
         }
     }
@@ -203,6 +207,7 @@ impl<D, B: Fn(usize, &D) -> Element> VirtualScrollView<D, B> {
             scroll_controller: None,
             invert_scroll_wheel: false,
             drag_scrolling: true,
+            wheel_axis_lock: None,
             key: DiffKey::None,
         }
     }
@@ -230,6 +235,7 @@ impl<D, B: Fn(usize, &D) -> Element> VirtualScrollView<D, B> {
             scroll_controller: Some(scroll_controller),
             invert_scroll_wheel: false,
             drag_scrolling: true,
+            wheel_axis_lock: None,
             key: DiffKey::None,
         }
     }
@@ -243,6 +249,16 @@ impl<D, B: Fn(usize, &D) -> Element> VirtualScrollView<D, B> {
     /// Sets the axis the items flow and scroll in.
     pub fn direction(mut self, direction: Direction) -> Self {
         self.layout.direction = direction;
+        self
+    }
+
+    /// Locks wheel scrolling to the gesture's dominant axis: when one axis's delta exceeds the other
+    /// by `threshold`×, the minor axis is suppressed. Stops a mostly-horizontal (or -vertical)
+    /// wheel/trackpad gesture from drifting this view along its cross axis (and consuming the event so
+    /// an outer scroll view never sees it). `threshold` ≥ `1.0`; lower locks more aggressively (`1.0`
+    /// ≈ always commit to the larger axis). Off by default (both axes scroll freely).
+    pub fn wheel_axis_lock(mut self, threshold: f32) -> Self {
+        self.wheel_axis_lock = Some(threshold);
         self
     }
 
@@ -356,6 +372,7 @@ impl<D: PartialEq + 'static, B: Fn(usize, &D) -> Element + 'static> Component
 
         let scroll_with_arrows = self.scroll_with_arrows;
         let invert_scroll_wheel = self.invert_scroll_wheel;
+        let wheel_axis_lock = self.wheel_axis_lock;
 
         let on_capture_global_pointer_press = move |e: Event<PointerEventData>| {
             if clicking_scrollbar.read().is_some() {
@@ -375,11 +392,23 @@ impl<D: PartialEq + 'static, B: Fn(usize, &D) -> Element + 'static> Component
                 && (*pressing_shift.read() || invert_scroll_wheel)
                 && (!*pressing_shift.read() || !invert_scroll_wheel);
 
-            let (x_movement, y_movement) = if invert_direction {
+            let (mut x_movement, mut y_movement) = if invert_direction {
                 (e.delta_y as f32, e.delta_x as f32)
             } else {
                 (e.delta_x as f32, e.delta_y as f32)
             };
+
+            // Axis lock: keep a dominant-axis gesture from drifting this view's cross axis (and
+            // swallowing the event from an outer scroll view). When one axis's delta exceeds the
+            // other by `threshold`×, zero the minor axis.
+            if let Some(threshold) = wheel_axis_lock {
+                let (ax, ay) = (x_movement.abs(), y_movement.abs());
+                if ay > ax * threshold {
+                    x_movement = 0.;
+                } else if ax > ay * threshold {
+                    y_movement = 0.;
+                }
+            }
 
             // Vertical scroll
             let scroll_position_y = get_scroll_position_from_wheel(

@@ -74,6 +74,7 @@ pub struct ScrollView {
     scroll_controller: Option<ScrollController>,
     invert_scroll_wheel: bool,
     drag_scrolling: bool,
+    wheel_axis_lock: Option<f32>,
     key: DiffKey,
 }
 
@@ -104,6 +105,7 @@ impl Default for ScrollView {
             scroll_controller: None,
             invert_scroll_wheel: false,
             drag_scrolling: true,
+            wheel_axis_lock: None,
             key: DiffKey::None,
         }
     }
@@ -159,6 +161,16 @@ impl ScrollView {
         self
     }
 
+    /// Locks wheel scrolling to the gesture's dominant axis: when one axis's delta exceeds the other
+    /// by `threshold`×, the minor axis is suppressed. Stops a mostly-vertical (or -horizontal)
+    /// wheel/trackpad gesture from drifting the cross axis — e.g. a horizontal outer scroll view that
+    /// wraps a vertical inner one. `threshold` ≥ `1.0`; lower locks more aggressively (`1.0` ≈ always
+    /// commit to the larger axis, like a spreadsheet). Off by default (both axes scroll freely).
+    pub fn wheel_axis_lock(mut self, threshold: f32) -> Self {
+        self.wheel_axis_lock = Some(threshold);
+        self
+    }
+
     /// Caps the width of the scroll view.
     pub fn max_width(mut self, max_width: impl Into<Size>) -> Self {
         self.layout.maximum_width = max_width.into();
@@ -197,6 +209,7 @@ impl Component for ScrollView {
         let layout = &self.layout.layout;
         let direction = layout.direction;
         let drag_scrolling = self.drag_scrolling;
+        let wheel_axis_lock = self.wheel_axis_lock;
 
         scroll_controller.use_apply(
             size.read().inner_sizes.width,
@@ -266,11 +279,23 @@ impl Component for ScrollView {
                 && (*pressing_shift.read() || invert_scroll_wheel)
                 && (!*pressing_shift.read() || !invert_scroll_wheel);
 
-            let (x_movement, y_movement) = if invert_direction {
+            let (mut x_movement, mut y_movement) = if invert_direction {
                 (e.delta_y as f32, e.delta_x as f32)
             } else {
                 (e.delta_x as f32, e.delta_y as f32)
             };
+
+            // Axis lock: keep a dominant-axis gesture from drifting the cross axis (e.g. a mostly
+            // vertical trackpad scroll nudging a horizontal outer view sideways). When one axis's
+            // delta exceeds the other by `threshold`×, zero the minor axis.
+            if let Some(threshold) = wheel_axis_lock {
+                let (ax, ay) = (x_movement.abs(), y_movement.abs());
+                if ay > ax * threshold {
+                    x_movement = 0.;
+                } else if ax > ay * threshold {
+                    y_movement = 0.;
+                }
+            }
 
             // Vertical scroll
             let scroll_position_y = get_scroll_position_from_wheel(
