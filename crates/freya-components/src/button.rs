@@ -33,11 +33,14 @@ define_theme! {
         %[fields]
         background: Color,
         hover_background: Color,
+        disabled_background: Color,
         border_fill: Color,
         hover_border_fill: Color,
         focus_border_fill: Color,
+        disabled_border_fill: Color,
         color: Color,
         hover_color: Color,
+        disabled_color: Color,
     }
 }
 
@@ -337,22 +340,28 @@ impl Component for Button {
                 .width(2.)
                 .alignment(BorderAlignment::Inner)
         } else {
-            let fill = if hovered {
+            let fill = if !self.enabled {
+                theme_colors.disabled_border_fill
+            } else if hovered {
                 theme_colors.hover_border_fill
             } else {
                 theme_colors.border_fill
             };
             Border::new()
-                .fill(fill.mul_if(!self.enabled, 0.9))
+                .fill(fill)
                 .width(1.)
                 .alignment(BorderAlignment::Inner)
         };
-        let background = if hovered {
+        let background = if !self.enabled {
+            theme_colors.disabled_background
+        } else if hovered {
             theme_colors.hover_background
         } else {
             theme_colors.background
         };
-        let color = if hovered {
+        let color = if !self.enabled {
+            theme_colors.disabled_color
+        } else if hovered {
             theme_colors.hover_color
         } else {
             theme_colors.color
@@ -363,13 +372,13 @@ impl Component for Button {
             .a11y_id(a11y_id)
             .a11y_focusable(self.enabled && self.focusable)
             .a11y_role(AccessibilityRole::Button)
-            .background(background.mul_if(!self.enabled, 0.9))
+            .background(background)
             .border(border)
             .padding(theme_layout.padding)
             .corner_radius(theme_layout.corner_radius)
             .width(theme_layout.width)
             .height(theme_layout.height)
-            .color(color.mul_if(!self.enabled, 0.9))
+            .color(color)
             .center()
             .maybe(self.enabled, |rect| {
                 rect.map(self.on_pointer_down.clone(), |rect, on_pointer_down| {

@@ -201,11 +201,14 @@ fn register_base_component_themes(theme: &mut Theme) {
         ButtonColorsThemePreference {
             background: Preference::Reference("surface_tertiary"),
             hover_background: Preference::Reference("surface_secondary"),
+            disabled_background: Preference::Reference("surface_tertiary"),
             border_fill: Preference::Reference("border"),
             hover_border_fill: Preference::Reference("border"),
             focus_border_fill: Preference::Reference("border_focus"),
+            disabled_border_fill: Preference::Reference("border_disabled"),
             color: Preference::Reference("text_primary"),
             hover_color: Preference::Reference("text_primary"),
+            disabled_color: Preference::Reference("disabled"),
         },
     );
     theme.set(
@@ -213,11 +216,14 @@ fn register_base_component_themes(theme: &mut Theme) {
         ButtonColorsThemePreference {
             background: Preference::Reference("primary"),
             hover_background: Preference::Reference("tertiary"),
+            disabled_background: Preference::Reference("disabled"),
             border_fill: Preference::Specific(Color::TRANSPARENT),
             hover_border_fill: Preference::Specific(Color::TRANSPARENT),
             focus_border_fill: Preference::Reference("secondary"),
+            disabled_border_fill: Preference::Specific(Color::TRANSPARENT),
             color: Preference::Reference("text_inverse"),
             hover_color: Preference::Reference("text_inverse"),
+            disabled_color: Preference::Reference("text_inverse"),
         },
     );
     theme.set(
@@ -225,11 +231,14 @@ fn register_base_component_themes(theme: &mut Theme) {
         ButtonColorsThemePreference {
             background: Preference::Reference("surface_tertiary"),
             hover_background: Preference::Reference("surface_secondary"),
+            disabled_background: Preference::Reference("surface_tertiary"),
             border_fill: Preference::Reference("border"),
             hover_border_fill: Preference::Reference("border"),
             focus_border_fill: Preference::Reference("secondary"),
+            disabled_border_fill: Preference::Reference("border_disabled"),
             color: Preference::Reference("primary"),
             hover_color: Preference::Reference("primary"),
+            disabled_color: Preference::Reference("disabled"),
         },
     );
     theme.set(
@@ -237,11 +246,14 @@ fn register_base_component_themes(theme: &mut Theme) {
         ButtonColorsThemePreference {
             background: Preference::Specific(Color::TRANSPARENT),
             hover_background: Preference::Reference("surface_tertiary"),
+            disabled_background: Preference::Specific(Color::TRANSPARENT),
             border_fill: Preference::Specific(Color::TRANSPARENT),
             hover_border_fill: Preference::Specific(Color::TRANSPARENT),
             focus_border_fill: Preference::Reference("border"),
+            disabled_border_fill: Preference::Specific(Color::TRANSPARENT),
             color: Preference::Reference("text_primary"),
             hover_color: Preference::Reference("text_primary"),
+            disabled_color: Preference::Reference("disabled"),
         },
     );
     theme.set(
