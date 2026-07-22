@@ -39,7 +39,8 @@ pub struct Platform {
     pub focused_accessibility_id: State<AccessibilityId>,
     /// The accessibility node data of the currently focused node.
     pub focused_accessibility_node: State<accesskit::Node>,
-    /// The size of the root window.
+    /// The size of the root window, in logical units — the same space as measured (sized-event)
+    /// areas, so the two can be compared directly.
     pub root_size: State<Size2D>,
     /// Rendering scale factor.
     pub scale_factor: State<f64>,

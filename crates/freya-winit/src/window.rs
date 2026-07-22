@@ -208,9 +208,11 @@ impl AppWindow {
                 focused_accessibility_node: State::create(accesskit::Node::new(
                     accesskit::Role::Window,
                 )),
+                // Logical units, like every measured area userland sees (sized events divide
+                // by the scale factor at the boundary) — so `root_size` composes with them.
                 root_size: State::create(Size2D::new(
-                    window_size.width as f32,
-                    window_size.height as f32,
+                    window_size.width as f32 / scale_factor as f32,
+                    window_size.height as f32 / scale_factor as f32,
                 )),
                 scale_factor: State::create(scale_factor),
                 navigation_mode: State::create(NavigationMode::NotKeyboard),

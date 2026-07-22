@@ -15,6 +15,7 @@ define_theme! {
         %[fields]
         width: Size,
         margin: Gaps,
+        list_margin: f32,
         select_background: Color,
         background_button: Color,
         hover_background: Color,
@@ -30,6 +31,18 @@ pub enum SelectStatus {
     #[default]
     Idle,
     Hovering,
+}
+
+/// Where the dropdown list opens relative to the trigger button.
+#[derive(Debug, Default, PartialEq, Clone, Copy)]
+pub enum SelectPlacement {
+    /// Open downward, flipping upward when there isn't room below (the default).
+    #[default]
+    Auto,
+    /// Always open upward.
+    Up,
+    /// Always open downward.
+    Down,
 }
 
 /// Select between different items component.
@@ -77,6 +90,7 @@ pub struct Select {
     selected_item: Option<Element>,
     children: Vec<Element>,
     cursor_icon: CursorIcon,
+    placement: SelectPlacement,
     key: DiffKey,
 }
 
@@ -105,6 +119,7 @@ impl Select {
             selected_item: None,
             children: Vec::new(),
             cursor_icon: CursorIcon::default(),
+            placement: SelectPlacement::default(),
             key: DiffKey::None,
         }
     }
@@ -123,6 +138,22 @@ impl Select {
     pub fn cursor_icon(mut self, cursor_icon: impl Into<CursorIcon>) -> Self {
         self.cursor_icon = cursor_icon.into();
         self
+    }
+
+    /// Where the list opens relative to the trigger (default: [`SelectPlacement::Auto`]).
+    pub fn placement(mut self, placement: SelectPlacement) -> Self {
+        self.placement = placement;
+        self
+    }
+
+    /// Shortcut for [`Self::placement`] with [`SelectPlacement::Up`].
+    pub fn open_up(self) -> Self {
+        self.placement(SelectPlacement::Up)
+    }
+
+    /// Shortcut for [`Self::placement`] with [`SelectPlacement::Down`].
+    pub fn open_down(self) -> Self {
+        self.placement(SelectPlacement::Down)
     }
 }
 
@@ -223,12 +254,29 @@ impl Component for Select {
 
         let offset_y = match (button_area(), list_size()) {
             (Some(button), Some(list)) => {
-                let root_height = Platform::get().root_size.peek().height;
-                let space_below = root_height - button.max_y();
-                let space_above = button.min_y();
-                let flips = list.height > space_below && list.height <= space_above;
+                let flips = match self.placement {
+                    SelectPlacement::Up => true,
+                    SelectPlacement::Down => false,
+                    // Measured areas and `root_size` are both logical, so the
+                    // fits-below/fits-above comparison is unit-consistent.
+                    SelectPlacement::Auto => {
+                        let root_height = Platform::get().root_size.peek().height;
+                        let space_below = root_height - button.max_y();
+                        let space_above = button.min_y();
+                        list.height > space_below && list.height <= space_above
+                    }
+                };
                 if flips {
-                    -(button.height() + list.height) - slide
+                    // The list's flow position is the trigger's margin-box bottom plus the
+                    // themed `list_margin`; the flipped list keeps that same margin as its gap
+                    // above — the shift unwinds all of it (twice: once to unwind the flow
+                    // margin, once for the gap), so the list's bottom lands just above the
+                    // trigger's top. (Everything here is logical: measured areas, margins,
+                    // and the authored offset.)
+                    -(button.height() + list.height)
+                        - theme.margin.bottom()
+                        - 2. * theme.list_margin
+                        - slide
                 } else {
                     slide
                 }
@@ -291,7 +339,7 @@ impl Component for Select {
                 rect().height(Size::px(0.)).width(Size::px(0.)).child(
                     rect()
                         .width(Size::window_percent(100.))
-                        .margin(Gaps::new(4., 0., 4., 0.))
+                        .margin(Gaps::new(theme.list_margin, 0., theme.list_margin, 0.))
                         .offset_y(offset_y)
                         .on_sized(move |e: Event<SizedEventData>| {
                             list_size.set_if_modified(Some(e.area.size));

@@ -491,6 +491,7 @@ fn register_base_component_themes(theme: &mut Theme) {
         SelectThemePreference {
             width: Preference::Specific(Size::Inner),
             margin: Preference::Specific(Gaps::new_all(0.)),
+            list_margin: Preference::Specific(4.),
             select_background: Preference::Reference("background"),
             background_button: Preference::Reference("surface_tertiary"),
             hover_background: Preference::Reference("surface_secondary"),

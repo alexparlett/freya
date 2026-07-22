@@ -737,7 +737,11 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                 scale_factor,
                                 &self.fallback_fonts,
                             );
-                            app.platform.root_size.set_if_modified(size);
+                            // Store logical units — the same space as the sized-event areas
+                            // (which divide by this scale factor), so userland can compare them.
+                            app.platform
+                                .root_size
+                                .set_if_modified(size / scale_factor as f32);
                             app.process_layout_on_next_render = false;
                             self.plugins.send(
                                 PluginEvent::FinishedMeasuringLayout {
