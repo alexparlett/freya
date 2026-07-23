@@ -17,6 +17,11 @@ use freya_animation::{
     prelude::AnimNum,
 };
 use freya_core::prelude::*;
+use torin::prelude::{
+    Area,
+    Size,
+    Size2D,
+};
 
 use crate::{
     attached::{
@@ -26,6 +31,10 @@ use crate::{
     context_menu::ContextMenu,
     define_theme,
     get_theme,
+    menu::{
+        EDGE_MARGIN,
+        overflow_offset,
+    },
 };
 
 define_theme! {
@@ -35,7 +44,10 @@ define_theme! {
         color: Color,
         background: Color,
         border_fill: Color,
+        /// Font family for the tooltip text; an empty string inherits the ambient font.
+        font_family: String,
         font_size: f32,
+        font_weight: i32,
     }
 }
 
@@ -92,11 +104,35 @@ impl Component for Tooltip {
             background,
             color,
             border_fill,
+            font_family,
             font_size,
+            font_weight,
         } = theme;
+
+        /// Cap on the card's width — longer messages wrap instead of stretching across
+        /// the window.
+        const MAX_WIDTH: f32 = 340.;
+
+        // Two-phase "max-content" sizing. An absolutely-positioned overlay inherits its
+        // *trigger's* available width, so a wrapping label would fold at that (one glyph
+        // per line off a 28px icon button) instead of at its own content. So: lay the
+        // text out on a single overflow-allowed line first and measure it; only when it
+        // genuinely exceeds the cap re-render as a fixed-width wrapping card (an explicit
+        // width, like a menu panel's, isn't clamped by the parent).
+        let mut measured = use_state(|| None::<(String, f32)>);
+        let text_width = measured
+            .read()
+            .as_ref()
+            .filter(|(text, _)| *text == self.text)
+            .map(|(_, width)| *width);
+        let wraps = text_width.is_some_and(|width| width > MAX_WIDTH);
+        let text = self.text.clone();
 
         rect()
             .interactive(Interactive::No)
+            .maybe(wraps, |el| el.width(Size::px(MAX_WIDTH)))
+            // Hidden until measured, so an over-long line never flashes before wrapping.
+            .opacity(if text_width.is_some() { 1. } else { 0. })
             .padding((4., 10.))
             .border(
                 Border::new()
@@ -108,8 +144,19 @@ impl Component for Tooltip {
             .corner_radius(8.)
             .child(
                 label()
-                    .max_lines(1)
+                    .maybe(!wraps, |el| el.max_lines(1))
+                    .on_sized(move |e: Event<SizedEventData>| {
+                        // Record once per text, from the single-line pass — the wrapped
+                        // re-layout reports the capped width and must not overwrite the
+                        // decision.
+                        if measured.peek().as_ref().is_none_or(|(t, _)| *t != text) {
+                            measured.set(Some((text.to_string(), e.area.width())));
+                        }
+                    })
+                    .maybe(!font_family.is_empty(), |el| el.font_family(font_family))
                     .font_size(font_size)
+                    .font_weight(font_weight)
+                    .line_height(1.45)
                     .color(color)
                     .text(self.text.clone()),
             )
@@ -221,11 +268,64 @@ impl Component for TooltipContainer {
 
         let is_visible = opacity > 0. && !ContextMenu::is_open();
 
-        let padding = match self.position {
+        // Window-bounds correction, once measured. On the **main axis** the tooltip *flips*
+        // to the opposite side of the trigger when the preferred side lacks room (sliding
+        // there would drag it over the trigger itself); on the **cross axis** it slides back
+        // inside via `overflow_offset` (`MenuContainer`'s technique). Hidden until the first
+        // measurement so it never flashes at the uncorrected position. The flip derives from
+        // the trigger's area and the tooltip's size only — both stable — so it can't
+        // oscillate with its own repositioning.
+        let mut anchor_area = use_state(|| None::<Area>);
+        let mut measured = use_state(|| None::<(Area, Size2D)>);
+
+        let position = match (anchor_area(), measured()) {
+            (Some(anchor), Some((tip, root_size))) => {
+                let fits = |position: AttachedPosition| match position {
+                    AttachedPosition::Top => anchor.min_y() - tip.height() >= EDGE_MARGIN,
+                    AttachedPosition::Bottom => {
+                        anchor.max_y() + tip.height() <= root_size.height - EDGE_MARGIN
+                    }
+                    AttachedPosition::Left => anchor.min_x() - tip.width() >= EDGE_MARGIN,
+                    AttachedPosition::Right => {
+                        anchor.max_x() + tip.width() <= root_size.width - EDGE_MARGIN
+                    }
+                };
+                let opposite = match self.position {
+                    AttachedPosition::Top => AttachedPosition::Bottom,
+                    AttachedPosition::Bottom => AttachedPosition::Top,
+                    AttachedPosition::Left => AttachedPosition::Right,
+                    AttachedPosition::Right => AttachedPosition::Left,
+                };
+                if !fits(self.position) && fits(opposite) {
+                    opposite
+                } else {
+                    self.position
+                }
+            }
+            _ => self.position,
+        };
+
+        let padding = match position {
             AttachedPosition::Top => (0., 0., 5., 0.),
             AttachedPosition::Bottom => (5., 0., 0., 0.),
             AttachedPosition::Left => (0., 5., 0., 0.),
             AttachedPosition::Right => (0., 0., 0., 5.),
+        };
+
+        let (offset_x, offset_y, opacity) = match measured() {
+            None => (0.0, 0.0, 0.0),
+            Some((area, root_size)) => match position {
+                AttachedPosition::Top | AttachedPosition::Bottom => (
+                    overflow_offset(area.origin.x, area.size.width, root_size.width),
+                    0.0,
+                    opacity,
+                ),
+                AttachedPosition::Left | AttachedPosition::Right => (
+                    0.0,
+                    overflow_offset(area.origin.y, area.size.height, root_size.height),
+                    opacity,
+                ),
+            },
         };
 
         rect()
@@ -235,15 +335,31 @@ impl Component for TooltipContainer {
             .on_pointer_over(on_pointer_over)
             .on_pointer_out(on_pointer_out)
             .child(
-                Attached::new(rect().children(self.children.clone()))
-                    .position(self.position)
-                    .maybe_child(is_visible.then(|| {
-                        rect()
-                            .opacity(opacity)
-                            .scale(scale)
-                            .padding(padding)
-                            .child(self.tooltip.clone())
-                    })),
+                Attached::new(
+                    rect()
+                        .on_sized(move |e: Event<SizedEventData>| {
+                            anchor_area.set_if_modified(Some(e.area));
+                        })
+                        .children(self.children.clone()),
+                )
+                .position(position)
+                .maybe_child(is_visible.then(|| {
+                    rect()
+                        .on_sized(move |e: Event<SizedEventData>| {
+                            // Track every re-measure (Attached positions the overlay a
+                            // frame after mount, and a flip moves it again): the offsets
+                            // shift this rect's *children*, never its own area, so
+                            // updating here cannot loop.
+                            let root_size = *Platform::get().root_size.peek();
+                            measured.set_if_modified(Some((e.area, root_size)));
+                        })
+                        .offset_x(offset_x)
+                        .offset_y(offset_y)
+                        .opacity(opacity)
+                        .scale(scale)
+                        .padding(padding)
+                        .child(self.tooltip.clone())
+                })),
             )
     }
 

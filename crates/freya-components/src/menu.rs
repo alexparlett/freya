@@ -673,12 +673,20 @@ impl ComponentOwned for SubMenu {
     }
 }
 
-/// Returns a negative offset to shift an element back within the window boundary,
-/// or `0.0` if it already fits.
-fn overflow_offset(origin: f32, size: f32, window: f32) -> f32 {
-    let overflow = origin + size - window;
+/// Breathing room a corrected overlay keeps from the window edge, so it never sits flush
+/// against the boundary. Shared by the overlay components ([`MenuContainer`], `TooltipContainer`).
+pub(crate) const EDGE_MARGIN: f32 = 2.;
+
+/// Returns the offset that shifts an element back within the window boundary (keeping
+/// [`EDGE_MARGIN`] from it) — positive when it hangs off the start edge, negative when it
+/// overflows the end edge — or `0.0` if it already fits.
+pub(crate) fn overflow_offset(origin: f32, size: f32, window: f32) -> f32 {
+    if origin < EDGE_MARGIN {
+        return EDGE_MARGIN - origin;
+    }
+    let overflow = origin + size - (window - EDGE_MARGIN);
     if overflow > 0.0 {
-        -overflow.min(origin)
+        -overflow.min(origin - EDGE_MARGIN)
     } else {
         0.0
     }

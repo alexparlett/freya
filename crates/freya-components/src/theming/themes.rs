@@ -381,7 +381,10 @@ fn register_base_component_themes(theme: &mut Theme) {
             background: Preference::Reference("surface_tertiary"),
             color: Preference::Reference("text_primary"),
             border_fill: Preference::Reference("surface_primary"),
+            // Empty family inherits the ambient font.
+            font_family: Preference::Specific(String::new()),
             font_size: Preference::Specific(14.),
+            font_weight: Preference::Specific(400),
         },
     );
     theme.set(
