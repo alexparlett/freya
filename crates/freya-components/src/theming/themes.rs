@@ -455,10 +455,13 @@ fn register_base_component_themes(theme: &mut Theme) {
     theme.set(
         "checkbox",
         CheckboxThemePreference {
-            unselected_fill: Preference::Reference("surface_inverse_tertiary"),
+            unselected_fill: Preference::Specific(Color::TRANSPARENT),
+            unselected_border_fill: Preference::Reference("surface_inverse_tertiary"),
             selected_fill: Preference::Reference("primary"),
+            selected_border_fill: Preference::Reference("primary"),
             selected_icon_fill: Preference::Reference("secondary"),
-            border_fill: Preference::Reference("surface_primary"),
+            hover_border_fill: Preference::Reference("surface_inverse"),
+            focus_border_fill: Preference::Reference("surface_primary"),
         },
     );
     theme.set(

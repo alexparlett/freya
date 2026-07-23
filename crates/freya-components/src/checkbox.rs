@@ -13,9 +13,13 @@ define_theme! {
     pub Checkbox {
         %[fields]
         unselected_fill: Color,
+        unselected_border_fill: Color,
         selected_fill: Color,
+        selected_border_fill: Color,
         selected_icon_fill: Color,
-        border_fill: Color,
+        /// Replaces either state's border while the pointer hovers the box.
+        hover_border_fill: Color,
+        focus_border_fill: Color,
     }
 }
 
@@ -106,11 +110,15 @@ impl Component for Checkbox {
     fn render(&self) -> impl IntoElement {
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
+        let mut hovered = use_state(|| false);
         let CheckboxTheme {
-            border_fill,
             unselected_fill,
+            unselected_border_fill,
             selected_fill,
+            selected_border_fill,
             selected_icon_fill,
+            hover_border_fill,
+            focus_border_fill,
         } = get_theme!(&self.theme, CheckboxThemePreference, "checkbox");
 
         let animation = use_animation_with_dependencies(&self.selected, move |conf, selected| {
@@ -135,20 +143,21 @@ impl Component for Checkbox {
 
         let (scale, opacity) = animation.read().value();
 
-        let (background, fill) = if self.selected {
-            (selected_fill, selected_fill)
+        let (background, state_border) = if self.selected {
+            (selected_fill, selected_border_fill)
         } else {
-            (Color::TRANSPARENT, unselected_fill)
+            (unselected_fill, unselected_border_fill)
         };
+        let fill = if hovered() { hover_border_fill } else { state_border };
 
         let border = Border::new()
             .fill(fill)
-            .width(2.)
+            .width(1.)
             .alignment(BorderAlignment::Inner);
 
         let focused_border = (focus() == Focus::Keyboard).then(|| {
             Border::new()
-                .fill(border_fill)
+                .fill(focus_border_fill)
                 .width((self.size * 0.15).ceil())
                 .alignment(BorderAlignment::Outer)
         });
@@ -159,13 +168,14 @@ impl Component for Checkbox {
             .a11y_role(AccessibilityRole::CheckBox)
             .width(Size::px(self.size))
             .height(Size::px(self.size))
-            .padding(Gaps::new_all(4.0))
             .main_align(Alignment::center())
             .cross_align(Alignment::center())
             .corner_radius(CornerRadius::new_all(self.size * 0.24))
             .border(border)
             .border(focused_border)
             .background(background)
+            .on_pointer_enter(move |_| hovered.set(true))
+            .on_pointer_leave(move |_| hovered.set(false))
             .on_key_down({
                 move |e: Event<KeyboardEventData>| {
                     if !e.is_press_event() {
