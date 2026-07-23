@@ -368,7 +368,10 @@ mod test {
         assert!(EventName::PointerOver < EventName::PointerEnter);
         for e in ALL {
             if e.is_global() && !e.is_capture() {
-                assert!(EventName::KeyDown < *e, "{e:?} should sort after platform events");
+                assert!(
+                    EventName::KeyDown < *e,
+                    "{e:?} should sort after platform events"
+                );
             }
         }
     }

@@ -168,6 +168,11 @@ impl ComponentOwned for Menu {
         // menu's own content (e.g. a focusable `Input` inside it — whose press `stop_propagation`
         // can't suppress this *global* handler, since the global press is a separate event).
         let mut menu_area = use_state(Area::default);
+        // Outside-press closing arms on the first pointer-*down* after mount: the click that
+        // *opened* the menu already went down before the menu existed, so its release (a global
+        // press event) must never count as the closing click. A real outside click goes
+        // down (arms) then presses (closes), still one click.
+        let mut armed = use_state(|| false);
 
         let on_close = self.on_close.clone();
         let on_global_key_down = move |e: Event<KeyboardEventData>| {
@@ -191,8 +196,13 @@ impl ComponentOwned for Menu {
             .on_press(move |ev: Event<PressEventData>| {
                 ev.stop_propagation();
             })
+            .on_global_pointer_down(move |_| armed.set_if_modified(true))
             .on_global_pointer_press(move |e: Event<PointerEventData>| {
-                // Close only when the press landed outside the menu's own bounds.
+                // Close only when armed (see above) and the press landed outside the
+                // menu's own bounds.
+                if !armed() {
+                    return;
+                }
                 let p = e.data().global_location();
                 let a = *menu_area.read();
                 let (px, py) = (p.x as f32, p.y as f32);
@@ -284,13 +294,23 @@ impl ComponentOwned for MenuContainer {
 
         use_provide_context(move || MenuGroup { group_id: a11y_id });
 
-        let (offset_x, offset_y, opacity) = match measured() {
-            None => (0.0, 0.0, 0.0),
-            Some((area, root_size)) => (
-                overflow_offset(area.origin.x, area.size.width, root_size.width),
-                overflow_offset(area.origin.y, area.size.height, root_size.height),
-                1.0,
-            ),
+        // Inside an `Attached` overlay the position arrives already window-clamped
+        // (`AttachedHosted`), and a second self-measured correction would lag a frame
+        // behind it and paint a visible jump, so skip it. The self-correction remains for
+        // directly-positioned hosts (the `ContextMenu` overlay at the cursor), where the
+        // first measurement is already at the final position.
+        let hosted = try_consume_context::<crate::attached::AttachedHosted>().is_some();
+        let (offset_x, offset_y, opacity) = if hosted {
+            (0.0, 0.0, 1.0)
+        } else {
+            match measured() {
+                None => (0.0, 0.0, 0.0),
+                Some((area, root_size)) => (
+                    overflow_offset(area.origin.x, area.size.width, root_size.width),
+                    overflow_offset(area.origin.y, area.size.height, root_size.height),
+                    1.0,
+                ),
+            }
         };
 
         rect()
@@ -300,10 +320,14 @@ impl ComponentOwned for MenuContainer {
             .offset_x(offset_x)
             .offset_y(offset_y)
             .on_sized(move |e: Event<SizedEventData>| {
-                if measured.peek().is_none() {
-                    let root_size = *Platform::get().root_size.peek();
-                    measured.set(Some((e.area, root_size)));
-                }
+                // Track every re-measure, not just the first: inside an `Attached` overlay
+                // the first `Sized` fires *before* the attached positioning applies, so a
+                // frozen first measurement locks the window-overflow correction to a
+                // pre-position area (a first-open menu lands visibly displaced). The
+                // offsets shift this rect's *children*, never its own area, so updating
+                // here cannot loop.
+                let root_size = *Platform::get().root_size.peek();
+                measured.set_if_modified(Some((e.area, root_size)));
             })
             .child(
                 rect()
@@ -678,8 +702,8 @@ impl ComponentOwned for SubMenu {
 pub(crate) const EDGE_MARGIN: f32 = 2.;
 
 /// Returns the offset that shifts an element back within the window boundary (keeping
-/// [`EDGE_MARGIN`] from it) — positive when it hangs off the start edge, negative when it
-/// overflows the end edge — or `0.0` if it already fits.
+/// [`EDGE_MARGIN`] from it): positive when it hangs off the start edge, negative when it
+/// overflows the end edge, or `0.0` if it already fits.
 pub(crate) fn overflow_offset(origin: f32, size: f32, window: f32) -> f32 {
     if origin < EDGE_MARGIN {
         return EDGE_MARGIN - origin;

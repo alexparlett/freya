@@ -1,5 +1,8 @@
 use freya_core::prelude::*;
-use torin::prelude::{Area, Direction};
+use torin::prelude::{
+    Area,
+    Direction,
+};
 
 /// Where along an axis a scroll should land, the beginning or the end.
 #[derive(Default, PartialEq, Eq)]
@@ -291,8 +294,18 @@ impl ScrollController {
         }
         let (x, y) = *self.scroll.peek();
 
-        let dx = reveal_delta(item.min_x(), item.max_x(), viewport.min_x(), viewport.max_x());
-        let dy = reveal_delta(item.min_y(), item.max_y(), viewport.min_y(), viewport.max_y());
+        let dx = reveal_delta(
+            item.min_x(),
+            item.max_x(),
+            viewport.min_x(),
+            viewport.max_x(),
+        );
+        let dy = reveal_delta(
+            item.min_y(),
+            item.max_y(),
+            viewport.min_y(),
+            viewport.max_y(),
+        );
 
         if dx != 0.0 {
             self.on_scroll

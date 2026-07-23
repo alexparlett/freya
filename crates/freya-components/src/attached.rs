@@ -4,6 +4,15 @@ use torin::prelude::{
     Position,
 };
 
+use crate::menu::overflow_offset;
+
+/// Marker context provided by [`Attached`] to its subtree: the overlay's position is
+/// already window-clamped, so hosted content (e.g. `MenuContainer`) must not apply its
+/// own post-hoc overflow correction: a second, self-measured correction lags a frame
+/// behind and paints a visible jump while `Attached` settles.
+#[derive(Clone)]
+pub(crate) struct AttachedHosted;
+
 /// Position where the attached element will be placed relative to the inner element.
 #[derive(PartialEq, Clone, Copy, Debug, Default)]
 pub enum AttachedPosition {
@@ -124,6 +133,8 @@ impl Component for Attached {
         let mut inner_area: State<Option<Area>> = use_state(|| None);
         let mut attached_area: State<Option<Area>> = use_state(|| None);
 
+        use_provide_context(|| AttachedHosted);
+
         let inner = *inner_area.read();
         let attached = *attached_area.read();
 
@@ -144,20 +155,38 @@ impl Component for Attached {
         let cross_h = align_offset(inner_width, attached_width);
         let cross_v = align_offset(inner_height, attached_height);
 
-        let position = match self.position {
-            AttachedPosition::Top => Position::new_absolute()
-                .top(-attached_height)
-                .left(cross_h),
-            AttachedPosition::Bottom => Position::new_absolute()
-                .top(inner_height)
-                .left(cross_h),
-            AttachedPosition::Left => Position::new_absolute()
-                .top(cross_v)
-                .left(-attached_width),
-            AttachedPosition::Right => Position::new_absolute()
-                .top(cross_v)
-                .left(inner_width),
+        let (left, top) = match self.position {
+            AttachedPosition::Top => (cross_h, -attached_height),
+            AttachedPosition::Bottom => (cross_h, inner_height),
+            AttachedPosition::Left => (-attached_width, cross_v),
+            AttachedPosition::Right => (inner_width, cross_v),
         };
+
+        // Window clamp, computed *with* the position in the same frame (the inner area's
+        // origin is global, so the overlay's would-be global origin is known here): the
+        // overlay slides back inside the window instead of hanging off an edge. Doing it
+        // here, rather than the overlay content self-measuring and offsetting after the
+        // fact, means there is never a frame positioned without its correction.
+        let (left, top) = match inner {
+            Some(inner_area) if is_measured => {
+                let root_size = *Platform::get().root_size.peek();
+                (
+                    left + overflow_offset(
+                        inner_area.origin.x + left,
+                        attached_width,
+                        root_size.width,
+                    ),
+                    top + overflow_offset(
+                        inner_area.origin.y + top,
+                        attached_height,
+                        root_size.height,
+                    ),
+                )
+            }
+            _ => (left, top),
+        };
+
+        let position = Position::new_absolute().top(top).left(left);
 
         rect()
             .on_sized(move |e: Event<SizedEventData>| inner_area.set(Some(e.area)))

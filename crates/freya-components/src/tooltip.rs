@@ -31,10 +31,7 @@ use crate::{
     context_menu::ContextMenu,
     define_theme,
     get_theme,
-    menu::{
-        EDGE_MARGIN,
-        overflow_offset,
-    },
+    menu::EDGE_MARGIN,
 };
 
 define_theme! {
@@ -109,7 +106,7 @@ impl Component for Tooltip {
             font_weight,
         } = theme;
 
-        /// Cap on the card's width — longer messages wrap instead of stretching across
+        /// Cap on the card's width: longer messages wrap instead of stretching across
         /// the window.
         const MAX_WIDTH: f32 = 340.;
 
@@ -146,7 +143,7 @@ impl Component for Tooltip {
                 label()
                     .maybe(!wraps, |el| el.max_lines(1))
                     .on_sized(move |e: Event<SizedEventData>| {
-                        // Record once per text, from the single-line pass — the wrapped
+                        // Record once per text, from the single-line pass: the wrapped
                         // re-layout reports the capped width and must not overwrite the
                         // decision.
                         if measured.peek().as_ref().is_none_or(|(t, _)| *t != text) {
@@ -259,7 +256,10 @@ impl Component for TooltipContainer {
             delay_task.set(Some(task));
         };
 
-        let on_pointer_out = move |_| {
+        // Shared dismiss: leaving the trigger hides the tooltip, and so does pressing it:
+        // an activated control (opening a dropdown, firing an action) must not keep its
+        // tooltip floating over whatever the press revealed.
+        let dismiss = move |_| {
             if let Some(handle) = delay_task.write().take() {
                 handle.cancel();
             }
@@ -268,13 +268,12 @@ impl Component for TooltipContainer {
 
         let is_visible = opacity > 0. && !ContextMenu::is_open();
 
-        // Window-bounds correction, once measured. On the **main axis** the tooltip *flips*
-        // to the opposite side of the trigger when the preferred side lacks room (sliding
-        // there would drag it over the trigger itself); on the **cross axis** it slides back
-        // inside via `overflow_offset` (`MenuContainer`'s technique). Hidden until the first
-        // measurement so it never flashes at the uncorrected position. The flip derives from
-        // the trigger's area and the tooltip's size only — both stable — so it can't
-        // oscillate with its own repositioning.
+        // Main-axis correction: the tooltip *flips* to the opposite side of the trigger
+        // when the preferred side lacks room (sliding there, which is what `Attached`'s
+        // window clamp would do, would drag it over the trigger itself). The cross axis
+        // needs nothing here: `Attached` clamps its overlay into the window atomically
+        // with the position. The flip derives from the trigger's area and the tooltip's
+        // size only, both stable, so it can't oscillate with its own repositioning.
         let mut anchor_area = use_state(|| None::<Area>);
         let mut measured = use_state(|| None::<(Area, Size2D)>);
 
@@ -312,28 +311,13 @@ impl Component for TooltipContainer {
             AttachedPosition::Right => (0., 0., 0., 5.),
         };
 
-        let (offset_x, offset_y, opacity) = match measured() {
-            None => (0.0, 0.0, 0.0),
-            Some((area, root_size)) => match position {
-                AttachedPosition::Top | AttachedPosition::Bottom => (
-                    overflow_offset(area.origin.x, area.size.width, root_size.width),
-                    0.0,
-                    opacity,
-                ),
-                AttachedPosition::Left | AttachedPosition::Right => (
-                    0.0,
-                    overflow_offset(area.origin.y, area.size.height, root_size.height),
-                    opacity,
-                ),
-            },
-        };
-
         rect()
             .layout(self.layout.clone())
             .a11y_focusable(false)
             .a11y_role(AccessibilityRole::Tooltip)
             .on_pointer_over(on_pointer_over)
-            .on_pointer_out(on_pointer_out)
+            .on_pointer_out(dismiss)
+            .on_pointer_down(dismiss)
             .child(
                 Attached::new(
                     rect()
@@ -346,15 +330,13 @@ impl Component for TooltipContainer {
                 .maybe_child(is_visible.then(|| {
                     rect()
                         .on_sized(move |e: Event<SizedEventData>| {
-                            // Track every re-measure (Attached positions the overlay a
-                            // frame after mount, and a flip moves it again): the offsets
-                            // shift this rect's *children*, never its own area, so
-                            // updating here cannot loop.
+                            // Only the tooltip's *size* (plus the window's) feeds the
+                            // flip; tracking every re-measure keeps it fresh across
+                            // remounts and cannot loop: the flip never changes the
+                            // tooltip's size.
                             let root_size = *Platform::get().root_size.peek();
                             measured.set_if_modified(Some((e.area, root_size)));
                         })
-                        .offset_x(offset_x)
-                        .offset_y(offset_y)
                         .opacity(opacity)
                         .scale(scale)
                         .padding(padding)

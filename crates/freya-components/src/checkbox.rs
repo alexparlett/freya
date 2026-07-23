@@ -148,7 +148,11 @@ impl Component for Checkbox {
         } else {
             (unselected_fill, unselected_border_fill)
         };
-        let fill = if hovered() { hover_border_fill } else { state_border };
+        let fill = if hovered() {
+            hover_border_fill
+        } else {
+            state_border
+        };
 
         let border = Border::new()
             .fill(fill)

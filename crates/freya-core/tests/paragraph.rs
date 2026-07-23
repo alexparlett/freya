@@ -171,8 +171,10 @@ fn letter_spacing_widens_a_label() {
         label().text("iiiiiiiiii").letter_spacing(6.0_f32)
     }
 
-    let plain = find_label_area(&launch(plain), "iiiiiiiiii").expect("plain label should be in the tree");
-    let spaced = find_label_area(&launch(spaced), "iiiiiiiiii").expect("spaced label should be in the tree");
+    let plain =
+        find_label_area(&launch(plain), "iiiiiiiiii").expect("plain label should be in the tree");
+    let spaced =
+        find_label_area(&launch(spaced), "iiiiiiiiii").expect("spaced label should be in the tree");
 
     // 10 glyphs → 9 gaps of extra tracking, so the label box must grow well past any font wobble.
     assert!(

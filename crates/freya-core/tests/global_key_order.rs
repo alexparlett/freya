@@ -21,10 +21,12 @@ pub fn global_key_listeners_document_order_and_consumption() {
                     }),
                 )
             })
-            .child(rect().on_global_key_down(move |_: Event<KeyboardEventData>| {
-                log.write().push("mid");
-                armed.set(true);
-            }))
+            .child(
+                rect().on_global_key_down(move |_: Event<KeyboardEventData>| {
+                    log.write().push("mid");
+                    armed.set(true);
+                }),
+            )
             .child(
                 rect().on_global_key_down(move |_: Event<KeyboardEventData>| {
                     log.write().push("tail")
@@ -39,9 +41,8 @@ pub fn global_key_listeners_document_order_and_consumption() {
     // First press: the early listener is not mounted yet; mid and tail both fire, in
     // document order.
     test.press_key(Key::Named(NamedKey::Enter));
-    let label = test.find(|_, element| {
-        Label::try_downcast(element).filter(|l| l.text.as_ref() == "mid,tail")
-    });
+    let label = test
+        .find(|_, element| Label::try_downcast(element).filter(|l| l.text.as_ref() == "mid,tail"));
     assert!(label.is_some(), "expected mid,tail after the first press");
 
     // Second press: early — first in document order despite being registered last —
