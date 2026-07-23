@@ -84,6 +84,23 @@ impl EditorHistory {
         self.current_transaction
     }
 
+    /// Close the current transaction group: the next pushed change starts a new
+    /// transaction regardless of the grouping threshold. Programmatic edits (e.g. a
+    /// whole-buffer rewrite) call this so they form their own undo step — and their
+    /// own [`current_change`](Self::current_change) — instead of merging into the
+    /// last interactive typing burst.
+    pub fn seal_transaction(&mut self) {
+        if let Some(last) = self
+            .transactions
+            .get_mut(self.current_transaction.saturating_sub(1))
+            && let Some(past) = last
+                .timestamp
+                .checked_sub(self.transaction_threshold_groping + Duration::from_nanos(1))
+        {
+            last.timestamp = past;
+        }
+    }
+
     pub fn any_pending_changes(&self) -> usize {
         self.transactions.len() - self.current_transaction
     }
