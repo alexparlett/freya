@@ -235,6 +235,16 @@ pub type TrayIconGetter = Box<dyn FnOnce() -> tray_icon::TrayIcon + Send>;
 #[cfg(feature = "tray")]
 pub type TrayHandler =
     Box<dyn FnMut(crate::tray_icon::TrayEvent, crate::renderer::RendererContext)>;
+/// Builds the application menubar. Runs once on the event loop thread when the app
+/// resumes (muda requires main-thread construction), so it must be `Send` to travel there.
+#[cfg(feature = "menu")]
+pub type MenuGetter = Box<dyn FnOnce() -> muda::Menu + Send>;
+/// Handles the menubar's [`muda::MenuEvent`]s on the renderer thread. Note tray menus
+/// (the `tray` feature) share muda's global event stream — when both features are
+/// enabled every menu event reaches both handlers, and each should match its own item
+/// ids and ignore the rest.
+#[cfg(feature = "menu")]
+pub type MenuHandler = Box<dyn FnMut(muda::MenuEvent, crate::renderer::RendererContext)>;
 
 pub type TaskHandler =
     Box<dyn FnOnce(crate::renderer::LaunchProxy) -> Pin<Box<dyn Future<Output = ()>>> + 'static>;
@@ -247,6 +257,8 @@ pub struct LaunchConfig {
     pub(crate) windows_configs: Vec<WindowConfig>,
     #[cfg(feature = "tray")]
     pub(crate) tray: (Option<TrayIconGetter>, Option<TrayHandler>),
+    #[cfg(feature = "menu")]
+    pub(crate) menu: (Option<MenuGetter>, Option<MenuHandler>),
     pub(crate) plugins: PluginsManager,
     pub(crate) embedded_fonts: EmbeddedFonts,
     pub(crate) fallback_fonts: Vec<Cow<'static, str>>,
@@ -262,6 +274,8 @@ impl Default for LaunchConfig {
             windows_configs: Vec::default(),
             #[cfg(feature = "tray")]
             tray: (None, None),
+            #[cfg(feature = "menu")]
+            menu: (None, None),
             plugins: PluginsManager::default(),
             embedded_fonts: Default::default(),
             fallback_fonts: default_fonts(),
@@ -326,6 +340,29 @@ impl LaunchConfig {
         + 'static,
     ) -> Self {
         self.tray = (Some(Box::new(tray_icon)), Some(Box::new(tray_handler)));
+        self
+    }
+
+    /// Register an application menubar and its handler.
+    ///
+    /// The `menu` closure builds the [`muda::Menu`] on the event loop thread when the
+    /// app resumes; on macOS it is then installed with `init_for_nsapp` (other platforms
+    /// currently build it without attaching — attach support per platform can come
+    /// later). `menu_handler` receives every [`muda::MenuEvent`] with a
+    /// [`RendererContext`](crate::renderer::RendererContext) — for a Quit item, prefer
+    /// [`RendererContext::request_close_window`] over a raw exit so the window's
+    /// [`on_close`](WindowConfig::with_on_close) veto keeps its say.
+    ///
+    /// Note: a muda item's accelerator is handled by the OS menu system *before* the
+    /// window sees the key, so an accelerator-carrying item shadows any equivalent
+    /// app-side key handling — route both to the same action.
+    #[cfg(feature = "menu")]
+    pub fn with_menu(
+        mut self,
+        menu: impl FnOnce() -> muda::Menu + 'static + Send,
+        menu_handler: impl FnMut(muda::MenuEvent, crate::renderer::RendererContext) + 'static,
+    ) -> Self {
+        self.menu = (Some(Box::new(menu)), Some(Box::new(menu_handler)));
         self
     }
 

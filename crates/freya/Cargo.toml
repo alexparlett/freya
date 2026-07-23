@@ -21,7 +21,7 @@ no-default-features = true
 [features]
 default = ["winit"]
 # Shortcuts
-all = ["all-crossplatform", "tray", "webview", "camera", "video"]
+all = ["all-crossplatform", "tray", "menu", "webview", "camera", "video"]
 all-crossplatform = [
   "winit",
   "router",
@@ -95,6 +95,7 @@ markdown = ["dep:freya-markdown"]
 markdown-code-editor = ["markdown", "code-editor", "freya-markdown/code-editor"]
 sdk = ["dep:freya-sdk"]
 tray = ["winit", "freya-winit/tray", "dep:tray-icon"]
+menu = ["winit", "freya-winit/menu"]
 material-design = ["dep:freya-material-design"]
 hotpath = ["winit", "freya-core/hotpath", "freya-winit/hotpath"]
 icons = ["dep:freya-icons"]

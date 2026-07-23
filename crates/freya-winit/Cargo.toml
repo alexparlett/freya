@@ -56,6 +56,7 @@ image = { workspace = true }
 
 # Tray
 tray-icon = { workspace = true, optional = true }
+muda = { workspace = true, optional = true }
 
 # Clipboard
 freya-clipboard = { workspace = true }
@@ -96,5 +97,6 @@ freya = { path = "../freya" }
 hotpath = ["hotpath/hotpath"]
 hotreload = ["freya-core/hotreload"]
 tray = ["dep:tray-icon", "dep:gtk"]
+menu = ["dep:muda"]
 tracing = []
 zoom-shortcuts = []

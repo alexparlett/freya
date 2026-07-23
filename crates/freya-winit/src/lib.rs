@@ -44,6 +44,13 @@ pub mod tray {
     pub use crate::tray_icon::*;
 }
 
+/// The muda menu vocabulary for building an application menubar
+/// (see [`LaunchConfig::with_menu`](crate::config::LaunchConfig::with_menu)).
+#[cfg(feature = "menu")]
+pub mod menu {
+    pub use muda::*;
+}
+
 /// Launch the application.
 ///
 /// If a custom event loop was provided via [`LaunchConfig::with_event_loop`], it will be used.
@@ -116,6 +123,10 @@ pub fn launch(mut launch_config: LaunchConfig) {
         tray: launch_config.tray,
         #[cfg(all(feature = "tray", not(target_os = "linux")))]
         tray_icon: None,
+        #[cfg(feature = "menu")]
+        menu: launch_config.menu,
+        #[cfg(feature = "menu")]
+        app_menu: None,
         resumed: false,
         futures: launch_config
             .tasks
@@ -140,18 +151,20 @@ pub fn launch(mut launch_config: LaunchConfig) {
                 NativeTrayEvent,
                 NativeTrayEventAction,
             },
-            tray::{
-                TrayIconEvent,
-                menu::MenuEvent,
-            },
+            tray::TrayIconEvent,
         };
 
-        let proxy = renderer.proxy.clone();
-        MenuEvent::set_event_handler(Some(move |event| {
-            let _ = proxy.send_event(NativeEvent::Tray(NativeTrayEvent {
-                action: NativeTrayEventAction::MenuEvent(event),
+        // With the `menu` feature on, muda's single global handler is set below and the
+        // renderer fans menu events out to both the menubar and tray handlers.
+        #[cfg(not(feature = "menu"))]
+        {
+            let proxy = renderer.proxy.clone();
+            crate::tray::menu::MenuEvent::set_event_handler(Some(move |event| {
+                let _ = proxy.send_event(NativeEvent::Tray(NativeTrayEvent {
+                    action: NativeTrayEventAction::MenuEvent(event),
+                }));
             }));
-        }));
+        }
         let proxy = renderer.proxy.clone();
         TrayIconEvent::set_event_handler(Some(move |event| {
             let _ = proxy.send_event(NativeEvent::Tray(NativeTrayEvent {
@@ -175,6 +188,16 @@ pub fn launch(mut launch_config: LaunchConfig) {
                 gtk::main();
             });
         }
+    }
+
+    // Muda's single global menu handler: forward every menu event through the loop; the
+    // renderer fans it out to the menubar handler and (when enabled) the tray handler.
+    #[cfg(feature = "menu")]
+    {
+        let proxy = renderer.proxy.clone();
+        muda::MenuEvent::set_event_handler(Some(move |event| {
+            let _ = proxy.send_event(NativeEvent::Menu(event));
+        }));
     }
 
     event_loop.run_app(&mut renderer).unwrap();

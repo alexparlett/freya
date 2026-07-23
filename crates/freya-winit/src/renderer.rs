@@ -83,6 +83,14 @@ pub struct WinitRenderer {
     ),
     #[cfg(all(feature = "tray", not(target_os = "linux")))]
     pub(crate) tray_icon: Option<TrayIcon>,
+    #[cfg(feature = "menu")]
+    pub(crate) menu: (
+        Option<crate::config::MenuGetter>,
+        Option<crate::config::MenuHandler>,
+    ),
+    /// The installed menubar, kept alive for the app's lifetime.
+    #[cfg(feature = "menu")]
+    pub(crate) app_menu: Option<muda::Menu>,
     pub resumed: bool,
     pub windows: FxHashMap<WindowId, AppWindow>,
     pub proxy: EventLoopProxy<NativeEvent>,
@@ -145,6 +153,28 @@ impl RendererContext<'_> {
     pub fn exit(&mut self) {
         self.active_event_loop.exit();
     }
+
+    /// Close a window through the same path as an OS-triggered close — the window's
+    /// [`on_close`](crate::config::WindowConfig::with_on_close) hook keeps its veto.
+    /// `None` targets the focused window (falling back to any). The request is queued
+    /// on the event loop, so it runs after the current handler returns.
+    pub fn request_close_window(&mut self, window_id: Option<WindowId>) {
+        let window_id = window_id.or_else(|| {
+            self.windows
+                .iter()
+                .find(|(_, app)| app.window.has_focus())
+                .or_else(|| self.windows.iter().next())
+                .map(|(id, _)| *id)
+        });
+        if let Some(window_id) = window_id {
+            self.proxy
+                .send_event(NativeEvent::Window(NativeWindowEvent {
+                    window_id,
+                    action: NativeWindowEventAction::RequestClose,
+                }))
+                .ok();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -156,6 +186,11 @@ pub enum NativeWindowEventAction {
     PlatformEvent(PlatformEvent),
 
     User(UserEvent),
+
+    /// Close the window through the same path as an OS-triggered close: the window's
+    /// [`on_close`](crate::config::WindowConfig::with_on_close) hook keeps its veto.
+    /// (The erased `CloseWindow` action force-removes instead.)
+    RequestClose,
 }
 
 /// Proxy wrapper provided to launch tasks so they can post callbacks executed inside the renderer.
@@ -246,6 +281,9 @@ pub enum NativeEvent {
     Window(NativeWindowEvent),
     #[cfg(feature = "tray")]
     Tray(NativeTrayEvent),
+    /// A menubar item was activated (muda's global menu event stream).
+    #[cfg(feature = "menu")]
+    Menu(muda::MenuEvent),
     Generic(NativeGenericEvent),
     Preferences(mundy::Preferences),
 }
@@ -259,9 +297,80 @@ impl From<accesskit_winit::Event> for NativeEvent {
     }
 }
 
+impl WinitRenderer {
+    /// Close `window_id` through the same path as an OS-triggered close: run the
+    /// window's [`on_close`](crate::config::WindowConfig::with_on_close) hook (which may
+    /// veto), remove the window on [`CloseDecision::Close`], and exit the loop when
+    /// nothing keeps the app alive. Shared by `WindowEvent::CloseRequested` and
+    /// [`NativeWindowEventAction::RequestClose`].
+    fn process_close_request(
+        &mut self,
+        window_id: WindowId,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) {
+        let mut on_close_hook = self
+            .windows
+            .get_mut(&window_id)
+            .and_then(|app| app.on_close.take());
+
+        let decision = if let Some(ref mut on_close) = on_close_hook {
+            let renderer_context = RendererContext {
+                fallback_fonts: &mut self.fallback_fonts,
+                active_event_loop: event_loop,
+                windows: &mut self.windows,
+                proxy: &mut self.proxy,
+                plugins: &mut self.plugins,
+                font_manager: &mut self.font_manager,
+                font_collection: &mut self.font_collection,
+                gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+            };
+            on_close(renderer_context, window_id)
+        } else {
+            CloseDecision::Close
+        };
+
+        if matches!(decision, CloseDecision::KeepOpen)
+            && let Some(app) = self.windows.get_mut(&window_id)
+        {
+            app.on_close = on_close_hook;
+        }
+
+        if matches!(decision, CloseDecision::Close) {
+            self.windows.remove(&window_id);
+            let has_windows = !self.windows.is_empty();
+
+            let has_tray = {
+                #[cfg(feature = "tray")]
+                {
+                    self.tray.1.is_some()
+                }
+                #[cfg(not(feature = "tray"))]
+                {
+                    false
+                }
+            };
+
+            // Only exit when there is no windows and no tray
+            if !has_windows && !has_tray && self.exit_on_close {
+                event_loop.exit();
+            }
+        }
+    }
+}
+
 impl ApplicationHandler<NativeEvent> for WinitRenderer {
     fn resumed(&mut self, active_event_loop: &winit::event_loop::ActiveEventLoop) {
         if !self.resumed {
+            // The menubar builds on this (main) thread; on macOS it installs into
+            // NSApp — replacing whatever menu winit set up.
+            #[cfg(feature = "menu")]
+            if let Some(menu) = self.menu.0.take() {
+                let menu = (menu)();
+                #[cfg(target_os = "macos")]
+                menu.init_for_nsapp();
+                self.app_menu = Some(menu);
+            }
+
             #[cfg(feature = "tray")]
             {
                 #[cfg(not(target_os = "linux"))]
@@ -418,7 +527,48 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     }
                 }
             }
+            #[cfg(feature = "menu")]
+            NativeEvent::Menu(menu_event) => {
+                // Tray menus share muda's global event stream — with both features on,
+                // both handlers see every event and match their own item ids.
+                #[cfg(feature = "tray")]
+                if let Some(tray_handler) = &mut self.tray.1 {
+                    let renderer_context = RendererContext {
+                        fallback_fonts: &mut self.fallback_fonts,
+                        active_event_loop,
+                        windows: &mut self.windows,
+                        proxy: &mut self.proxy,
+                        plugins: &mut self.plugins,
+                        font_manager: &mut self.font_manager,
+                        font_collection: &mut self.font_collection,
+                        gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                    };
+                    (tray_handler)(
+                        crate::tray::TrayEvent::Menu(menu_event.clone()),
+                        renderer_context,
+                    );
+                }
+                if let Some(menu_handler) = &mut self.menu.1 {
+                    let renderer_context = RendererContext {
+                        fallback_fonts: &mut self.fallback_fonts,
+                        active_event_loop,
+                        windows: &mut self.windows,
+                        proxy: &mut self.proxy,
+                        plugins: &mut self.plugins,
+                        font_manager: &mut self.font_manager,
+                        font_collection: &mut self.font_collection,
+                        gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                    };
+                    (menu_handler)(menu_event, renderer_context);
+                }
+            }
             NativeEvent::Window(NativeWindowEvent { action, window_id }) => {
+                // The close request needs `&mut self` (it may remove the window), so it
+                // is handled before the per-window borrow below.
+                if matches!(action, NativeWindowEventAction::RequestClose) {
+                    self.process_close_request(window_id, active_event_loop);
+                    return;
+                }
                 if let Some(app) = &mut self.windows.get_mut(&window_id) {
                     match action {
                         NativeWindowEventAction::PollRunner => {
@@ -509,6 +659,8 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                 tracing::info!("{:#?}", app.runner);
                             }
                         }
+                        // Intercepted before the per-window borrow above.
+                        NativeWindowEventAction::RequestClose => {}
                         NativeWindowEventAction::Accessibility(
                             accesskit_winit::WindowEvent::AccessibilityDeactivated,
                         ) => {
@@ -658,53 +810,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     app.tree.text_cache.reset();
                 }
                 WindowEvent::CloseRequested => {
-                    let mut on_close_hook = self
-                        .windows
-                        .get_mut(&window_id)
-                        .and_then(|app| app.on_close.take());
-
-                    let decision = if let Some(ref mut on_close) = on_close_hook {
-                        let renderer_context = RendererContext {
-                            fallback_fonts: &mut self.fallback_fonts,
-                            active_event_loop: event_loop,
-                            windows: &mut self.windows,
-                            proxy: &mut self.proxy,
-                            plugins: &mut self.plugins,
-                            font_manager: &mut self.font_manager,
-                            font_collection: &mut self.font_collection,
-                            gpu_resource_cache_limit: self.gpu_resource_cache_limit,
-                        };
-                        on_close(renderer_context, window_id)
-                    } else {
-                        CloseDecision::Close
-                    };
-
-                    if matches!(decision, CloseDecision::KeepOpen)
-                        && let Some(app) = self.windows.get_mut(&window_id)
-                    {
-                        app.on_close = on_close_hook;
-                    }
-
-                    if matches!(decision, CloseDecision::Close) {
-                        self.windows.remove(&window_id);
-                        let has_windows = !self.windows.is_empty();
-
-                        let has_tray = {
-                            #[cfg(feature = "tray")]
-                            {
-                                self.tray.1.is_some()
-                            }
-                            #[cfg(not(feature = "tray"))]
-                            {
-                                false
-                            }
-                        };
-
-                        // Only exit when there is no windows and no tray
-                        if !has_windows && !has_tray && self.exit_on_close {
-                            event_loop.exit();
-                        }
-                    }
+                    self.process_close_request(window_id, event_loop);
                 }
                 WindowEvent::ModifiersChanged(modifiers) => {
                     app.modifiers_state = modifiers.state();

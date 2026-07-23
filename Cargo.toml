@@ -53,6 +53,7 @@ members = [
   "./examples/android",
   "./examples/component_video",
   "./examples/feature_camera",
+  "./examples/feature_menu",
   "./examples/feature_tray",
   "./examples/feature_tray_radio_state",
   "./examples/feature_webview",
@@ -155,6 +156,7 @@ winit = "0.30.13"
 
 # Tray
 tray-icon = "0.21"
+muda = "0.17"
 
 # OpenGL
 gl = "0.14.0"

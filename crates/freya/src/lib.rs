@@ -304,6 +304,14 @@ pub mod tray {
     pub use freya_winit::tray::*;
 }
 
+/// Reexport `muda` (the application-menubar vocabulary) when the `menu` feature is
+/// enabled — see `LaunchConfig::with_menu`.
+#[cfg_attr(feature = "docs", doc(cfg(feature = "menu")))]
+#[cfg(feature = "menu")]
+pub mod menu {
+    pub use freya_winit::menu::*;
+}
+
 /// Reexport `freya-sdk` when the `sdk` feature is enabled.
 #[cfg_attr(feature = "docs", doc(cfg(feature = "sdk")))]
 #[cfg(feature = "sdk")]
