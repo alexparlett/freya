@@ -174,8 +174,12 @@ impl ComponentOwned for Menu {
             if e.key == Key::Named(NamedKey::Escape) {
                 if menus.read().len() > 1 {
                     menus.write().pop();
+                    // Consume the Escape: cancels the remaining global key events so
+                    // deeper listeners don't also act on the same press.
+                    e.prevent_default();
                 } else if let Some(on_close) = &on_close {
                     on_close.call(());
+                    e.prevent_default();
                 }
             }
         };

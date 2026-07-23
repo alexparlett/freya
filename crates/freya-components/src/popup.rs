@@ -230,6 +230,8 @@ impl Component for Popup {
             move |e: Event<KeyboardEventData>| {
                 if close && e.key == Key::Named(NamedKey::Escape) {
                     req();
+                    // Consume the Escape so deeper global listeners don't also act on it.
+                    e.prevent_default();
                 }
             }
         };

@@ -153,6 +153,51 @@ impl Tree {
         }
     }
 
+    /// Compare two nodes by document position (pre-order): ancestors before descendants,
+    /// siblings by child index. Nodes with no common root compare `Equal`.
+    pub fn document_order(&self, a: NodeId, b: NodeId) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        if a == b {
+            return Ordering::Equal;
+        }
+
+        let chain_to_root = |mut node: NodeId| {
+            let mut chain = vec![node];
+            while let Some(parent) = self.parents.get(&node) {
+                chain.push(*parent);
+                node = *parent;
+            }
+            chain.reverse(); // root .. node
+            chain
+        };
+
+        let chain_a = chain_to_root(a);
+        let chain_b = chain_to_root(b);
+        if chain_a[0] != chain_b[0] {
+            return Ordering::Equal;
+        }
+
+        // Walk down from the shared root to the first divergence. The chains cannot be
+        // identical (a != b), so one side always diverges or runs out first.
+        let mut depth = 1;
+        while depth < chain_a.len() && chain_a.get(depth) == chain_b.get(depth) {
+            depth += 1;
+        }
+        match (chain_a.get(depth), chain_b.get(depth)) {
+            // One chain ran out: that node is an ancestor of the other, so it comes first.
+            (None, _) => Ordering::Less,
+            (_, None) => Ordering::Greater,
+            (Some(child_a), Some(child_b)) => {
+                let Some(children) = self.children.get(&chain_a[depth - 1]) else {
+                    return Ordering::Equal;
+                };
+                let index_of = |child: &NodeId| children.iter().position(|c| c == child);
+                index_of(child_a).cmp(&index_of(child_b))
+            }
+        }
+    }
+
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn apply_mutations(&mut self, mutations: Mutations) -> MutationsApplyResult {
         let mut needs_render = !mutations.removed.is_empty();
@@ -808,5 +853,43 @@ impl LayoutMeasurer<NodeId> for LayoutMeasurerAdapter<'_> {
             bubbles: false,
             source_event: EventName::Sized,
         });
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::Tree;
+    use crate::node_id::NodeId;
+
+    /// root(1) → [2, 3] · 2 → [4, 5] · 3 → [6]
+    fn tree() -> Tree {
+        let mut tree = Tree::default();
+        let n = NodeId::from;
+        for (parent, children) in [(1, vec![2, 3]), (2, vec![4, 5]), (3, vec![6])] {
+            for child in &children {
+                tree.parents.insert(n(*child), n(parent));
+            }
+            tree.children
+                .insert(n(parent), children.into_iter().map(n).collect());
+        }
+        tree
+    }
+
+    #[test]
+    fn document_order_is_pre_order() {
+        use std::cmp::Ordering::*;
+        let tree = tree();
+        let n = NodeId::from;
+
+        assert_eq!(tree.document_order(n(4), n(4)), Equal);
+        // Ancestors come before descendants.
+        assert_eq!(tree.document_order(n(1), n(6)), Less);
+        assert_eq!(tree.document_order(n(2), n(4)), Less);
+        assert_eq!(tree.document_order(n(4), n(2)), Greater);
+        // Siblings by child index, subtrees fully before later siblings.
+        assert_eq!(tree.document_order(n(4), n(5)), Less);
+        assert_eq!(tree.document_order(n(2), n(3)), Less);
+        assert_eq!(tree.document_order(n(5), n(6)), Less);
+        assert_eq!(tree.document_order(n(6), n(4)), Greater);
     }
 }

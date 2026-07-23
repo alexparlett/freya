@@ -32,6 +32,14 @@ where
     fn is_node_transparent(&self, key: &Self::Key) -> bool;
     fn is_node_interactive(&self, key: &Self::Key) -> bool;
 
+    /// Total order of two node keys by document position (pre-order: ancestors before
+    /// descendants, siblings by child index). Used to emit same-name global events in a
+    /// deterministic order regardless of listener registration order. Defaults to
+    /// [`std::cmp::Ordering::Equal`], which preserves insertion order.
+    fn document_order(&self, _a: &Self::Key, _b: &Self::Key) -> std::cmp::Ordering {
+        std::cmp::Ordering::Equal
+    }
+
     fn try_area_of(&self, key: &Self::Key) -> Option<Area>;
 
     fn new_emmitable_event(
@@ -86,9 +94,20 @@ impl<T: EventsMeasurer + private::Sealed> EventsMeasurerRunner for T {
             source_events,
             &mut emmitable_events,
         );
-        // Join all the emmitable events and sort them
+        // Join all the emmitable events and sort them. The sort is stable and same-name
+        // global events tie-break by document position, so multiple listeners of the same
+        // global event fire in a deterministic pre-order — which is what lets an earlier
+        // listener consume the event (via `prevent_default`) before later ones see it.
         emmitable_events.extend(collateral_emmitable_events);
-        emmitable_events.sort_unstable();
+        emmitable_events.sort_by(|a, b| {
+            a.cmp(b).then_with(|| {
+                if a.name().is_global() {
+                    self.document_order(&a.key(), &b.key())
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+        });
 
         let mut flattened_potential_events = potential_events.into_values().flatten().collect_vec();
         flattened_potential_events.sort_unstable();

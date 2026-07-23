@@ -63,6 +63,14 @@ pub trait WinitPlatformExt {
     /// ```
     fn close_window(&self, window_id: WindowId);
 
+    /// Close the window this [`Platform`] is bound to.
+    ///
+    /// Unlike an OS-triggered close, this bypasses the window's
+    /// [`on_close`](crate::config::WindowConfig::with_on_close) hook — use it to actually
+    /// close after such a hook returned [`CloseDecision::KeepOpen`](crate::config::CloseDecision)
+    /// and the app has confirmed the close through its own UI.
+    fn close_current_window(&self);
+
     /// Focus a window by its [`WindowId`].
     ///
     /// If `window_id` is `None`, the current window will be focused.
@@ -177,6 +185,13 @@ impl WinitPlatformExt for Platform {
         self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
             NativeWindowErasedEventAction::CloseWindow(window_id),
         ))));
+    }
+
+    fn close_current_window(&self) {
+        // The bound window's id is only resolved on the renderer side, so hop there first
+        // and dispatch the close from the callback.
+        let platform = self.clone();
+        drop(self.post_callback(move |window_id, _| platform.close_window(window_id)));
     }
 
     fn focus_window(&self, window_id: Option<WindowId>) {

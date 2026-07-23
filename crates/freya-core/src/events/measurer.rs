@@ -37,6 +37,10 @@ impl ragnarok::EventsMeasurer for EventsMeasurerAdapter<'_> {
             .unwrap_or_default()
     }
 
+    fn document_order(&self, a: &Self::Key, b: &Self::Key) -> std::cmp::Ordering {
+        self.tree.document_order(*a, *b)
+    }
+
     fn get_layers(&self) -> impl Iterator<Item = (&i16, impl Iterator<Item = &Self::Key>)> {
         self.tree
             .layers
