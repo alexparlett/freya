@@ -350,8 +350,9 @@ impl LaunchConfig {
     /// currently build it without attaching — attach support per platform can come
     /// later). `menu_handler` receives every [`muda::MenuEvent`] with a
     /// [`RendererContext`](crate::renderer::RendererContext) — for a Quit item, prefer
-    /// [`RendererContext::request_close_window`] over a raw exit so the window's
-    /// [`on_close`](WindowConfig::with_on_close) veto keeps its say.
+    /// [`NativeEventExt::request_close_window`](crate::renderer::NativeEventExt::request_close_window)
+    /// over a raw exit so the window's [`on_close`](WindowConfig::with_on_close) veto
+    /// keeps its say.
     ///
     /// Note: a muda item's accelerator is handled by the OS menu system *before* the
     /// window sees the key, so an accelerator-carrying item shadows any equivalent

@@ -153,27 +153,73 @@ impl RendererContext<'_> {
     pub fn exit(&mut self) {
         self.active_event_loop.exit();
     }
+}
 
-    /// Close a window through the same path as an OS-triggered close — the window's
+/// Queue [`NativeEvent`]s for windows on the event loop. The two required methods are
+/// the primitives (target resolution and the queue itself); the provided methods are
+/// the window-targeted requests built on top, shared by every implementor. Queued
+/// events run after the current handler returns.
+pub trait NativeEventExt {
+    /// The window a `None` target resolves to: the focused window, falling back to any.
+    fn resolve_window_id(&self, window_id: Option<WindowId>) -> Option<WindowId>;
+
+    /// Queue one event on the event loop.
+    fn send_native_event(&mut self, event: NativeEvent);
+
+    /// Close a window through the same path as an OS-triggered close: the window's
     /// [`on_close`](crate::config::WindowConfig::with_on_close) hook keeps its veto.
-    /// `None` targets the focused window (falling back to any). The request is queued
-    /// on the event loop, so it runs after the current handler returns.
-    pub fn request_close_window(&mut self, window_id: Option<WindowId>) {
-        let window_id = window_id.or_else(|| {
+    /// `None` targets the focused window (falling back to any).
+    fn request_close_window(&mut self, window_id: Option<WindowId>) {
+        if let Some(window_id) = self.resolve_window_id(window_id) {
+            self.send_native_event(NativeEvent::Window(NativeWindowEvent {
+                window_id,
+                action: NativeWindowEventAction::RequestClose,
+            }));
+        }
+    }
+
+    /// Send a synthetic key press (a key down followed by a key up) through a window's
+    /// normal keyboard pipeline, as if the user typed it. `None` targets the focused
+    /// window (falling back to any). This backs menubar items whose action belongs to
+    /// the focused text element (an Edit menu's undo / copy / paste), so dispatch
+    /// reuses the same focus and binding resolution as real input.
+    fn send_key_press(
+        &mut self,
+        window_id: Option<WindowId>,
+        key: keyboard_types::Key,
+        code: keyboard_types::Code,
+        modifiers: keyboard_types::Modifiers,
+    ) {
+        let Some(window_id) = self.resolve_window_id(window_id) else {
+            return;
+        };
+        for name in [KeyboardEventName::KeyDown, KeyboardEventName::KeyUp] {
+            self.send_native_event(NativeEvent::Window(NativeWindowEvent {
+                window_id,
+                action: NativeWindowEventAction::PlatformEvent(PlatformEvent::Keyboard {
+                    name,
+                    key: key.clone(),
+                    code,
+                    modifiers,
+                }),
+            }));
+        }
+    }
+}
+
+impl NativeEventExt for RendererContext<'_> {
+    fn resolve_window_id(&self, window_id: Option<WindowId>) -> Option<WindowId> {
+        window_id.or_else(|| {
             self.windows
                 .iter()
                 .find(|(_, app)| app.window.has_focus())
                 .or_else(|| self.windows.iter().next())
                 .map(|(id, _)| *id)
-        });
-        if let Some(window_id) = window_id {
-            self.proxy
-                .send_event(NativeEvent::Window(NativeWindowEvent {
-                    window_id,
-                    action: NativeWindowEventAction::RequestClose,
-                }))
-                .ok();
-        }
+        })
+    }
+
+    fn send_native_event(&mut self, event: NativeEvent) {
+        self.proxy.send_event(event).ok();
     }
 }
 

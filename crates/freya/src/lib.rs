@@ -115,6 +115,7 @@ pub mod prelude {
         },
         renderer::{
             NativeEvent,
+            NativeEventExt,
             RendererContext,
         },
     };
