@@ -397,3 +397,25 @@ impl ResolvablePreference<Duration> for Preference<Duration> {
         }
     }
 }
+
+impl ResolvablePreference<String> for Preference<String> {
+    fn resolve(&self, _colors_sheet: &ColorsSheet) -> String {
+        match self {
+            Self::Reference(_) => {
+                panic!("Only Colors support references.")
+            }
+            Self::Specific(value) => value.clone(),
+        }
+    }
+}
+
+impl ResolvablePreference<i32> for Preference<i32> {
+    fn resolve(&self, _colors_sheet: &ColorsSheet) -> i32 {
+        match self {
+            Self::Reference(_) => {
+                panic!("Only Colors support references.")
+            }
+            Self::Specific(value) => *value,
+        }
+    }
+}
