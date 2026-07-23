@@ -6,7 +6,6 @@ use std::{
 };
 
 use freya_clipboard::clipboard::Clipboard;
-use freya_core::events::modifiers::ModifiersExt;
 use keyboard_types::{
     Key,
     Modifiers,
@@ -14,7 +13,13 @@ use keyboard_types::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::editor_history::EditorHistory;
+use crate::{
+    config::{
+        EditAction,
+        EditBindings,
+    },
+    editor_history::EditorHistory,
+};
 
 #[derive(PartialEq, Clone, Debug, Copy, Hash)]
 pub enum EditorLine {
@@ -480,6 +485,75 @@ pub trait TextEditor {
         let selection = self.get_selection();
         let skip_arrows_movement = !modifiers.contains(Modifiers::SHIFT) && selection.is_some();
 
+        // The rebindable editing chords (see [`EditBindings`]) run before the default
+        // handling below since any editing action may sit on any chord. A matching
+        // press is always consumed, even when its action is not allowed right now or
+        // has nothing to do, so the chord never leaks into the text as typed input.
+        if let Some(action) = self.edit_bindings().resolve(key, modifiers) {
+            match action {
+                EditAction::SelectAll => {
+                    let len = self.len_utf16_cu();
+                    self.set_selection((0, len));
+                }
+                EditAction::Copy if allow_write_clipboard => {
+                    let selected = self.get_selected_text();
+                    if let Some(selected) = selected {
+                        Clipboard::set(selected).ok();
+                    }
+                }
+                EditAction::Cut if allow_changes && allow_write_clipboard => {
+                    let selection = self.get_selection_range();
+                    if let Some((start, end)) = selection {
+                        let text = self.get_selected_text().unwrap_or_default();
+                        self.remove(start..end);
+                        Clipboard::set(text).ok();
+                        self.move_cursor_to(start);
+                        event.insert(TextEvent::TEXT_CHANGED);
+                    }
+                }
+                EditAction::Paste if allow_changes && allow_read_clipboard => {
+                    if let Ok(copied_text) = Clipboard::get() {
+                        let selection = self.get_selection_range();
+                        if let Some((start, end)) = selection {
+                            self.remove(start..end);
+                            self.move_cursor_to(start);
+                        }
+                        let cursor_pos = self.cursor_pos();
+                        self.insert(&copied_text, cursor_pos);
+                        let last_idx = copied_text.encode_utf16().count() + cursor_pos;
+                        self.move_cursor_to(last_idx);
+                        event.insert(TextEvent::TEXT_CHANGED);
+                    }
+                }
+                EditAction::Undo if allow_changes => {
+                    if let Some(new_selection) = self.undo() {
+                        *self.selection_mut() = new_selection;
+                        event.insert(TextEvent::TEXT_CHANGED);
+                        event.insert(TextEvent::SELECTION_CHANGED);
+                    }
+                }
+                EditAction::Redo if allow_changes => {
+                    if let Some(new_selection) = self.redo() {
+                        *self.selection_mut() = new_selection;
+                        event.insert(TextEvent::TEXT_CHANGED);
+                        event.insert(TextEvent::SELECTION_CHANGED);
+                    }
+                }
+                _ => {}
+            }
+
+            // Same tail as the fall-through path below.
+            if event.contains(TextEvent::TEXT_CHANGED)
+                && !event.contains(TextEvent::SELECTION_CHANGED)
+            {
+                self.clear_selection();
+            }
+            if self.get_selection() != selection {
+                event.insert(TextEvent::SELECTION_CHANGED);
+            }
+            return event;
+        }
+
         match key {
             Key::Named(NamedKey::Shift) => {}
             Key::Named(NamedKey::Control) => {}
@@ -604,8 +678,6 @@ pub trait TextEditor {
                 event.insert(TextEvent::TEXT_CHANGED);
             }
             Key::Character(character) => {
-                let meta_or_ctrl = modifiers.contains(Modifiers::ctrl_or_meta());
-
                 match character.as_str() {
                     " " if allow_changes => {
                         let selection = self.get_selection_range();
@@ -621,70 +693,6 @@ pub trait TextEditor {
                         self.cursor_right();
 
                         event.insert(TextEvent::TEXT_CHANGED);
-                    }
-
-                    // Select all text
-                    "a" if meta_or_ctrl => {
-                        let len = self.len_utf16_cu();
-                        self.set_selection((0, len));
-                    }
-
-                    // Copy selected text
-                    "c" if meta_or_ctrl && allow_write_clipboard => {
-                        let selected = self.get_selected_text();
-                        if let Some(selected) = selected {
-                            Clipboard::set(selected).ok();
-                        }
-                    }
-
-                    // Cut selected text
-                    "x" if meta_or_ctrl && allow_changes && allow_write_clipboard => {
-                        let selection = self.get_selection_range();
-                        if let Some((start, end)) = selection {
-                            let text = self.get_selected_text().unwrap();
-                            self.remove(start..end);
-                            Clipboard::set(text).ok();
-                            self.move_cursor_to(start);
-                            event.insert(TextEvent::TEXT_CHANGED);
-                        }
-                    }
-
-                    // Paste copied text
-                    "v" if meta_or_ctrl && allow_changes && allow_read_clipboard => {
-                        if let Ok(copied_text) = Clipboard::get() {
-                            let selection = self.get_selection_range();
-                            if let Some((start, end)) = selection {
-                                self.remove(start..end);
-                                self.move_cursor_to(start);
-                            }
-                            let cursor_pos = self.cursor_pos();
-                            self.insert(&copied_text, cursor_pos);
-                            let last_idx = copied_text.encode_utf16().count() + cursor_pos;
-                            self.move_cursor_to(last_idx);
-                            event.insert(TextEvent::TEXT_CHANGED);
-                        }
-                    }
-
-                    // Undo last change
-                    "z" if meta_or_ctrl && allow_changes => {
-                        let undo_result = self.undo();
-
-                        if let Some(selection) = undo_result {
-                            *self.selection_mut() = selection;
-                            event.insert(TextEvent::TEXT_CHANGED);
-                            event.insert(TextEvent::SELECTION_CHANGED);
-                        }
-                    }
-
-                    // Redo last change
-                    "y" if meta_or_ctrl && allow_changes => {
-                        let redo_result = self.redo();
-
-                        if let Some(selection) = redo_result {
-                            *self.selection_mut() = selection;
-                            event.insert(TextEvent::TEXT_CHANGED);
-                            event.insert(TextEvent::SELECTION_CHANGED);
-                        }
                     }
 
                     _ if allow_changes => {
@@ -729,6 +737,14 @@ pub trait TextEditor {
     }
 
     fn get_selected_text(&self) -> Option<String>;
+
+    /// The chords this editor's [`EditAction`]s (select all / copy / cut / paste /
+    /// undo / redo) respond to in [`process_key`](Self::process_key). Override it to
+    /// make the chords configurable per editor instance; the default is the platform
+    /// convention (see [`EditBindings::default`]).
+    fn edit_bindings(&self) -> &EditBindings {
+        EditBindings::default_ref()
+    }
 
     fn undo(&mut self) -> Option<TextSelection>;
 

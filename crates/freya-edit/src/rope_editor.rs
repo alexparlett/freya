@@ -10,6 +10,7 @@ use ropey::{
 
 use crate::{
     TextSelection,
+    config::EditBindings,
     editor_history::{
         EditorHistory,
         HistoryChange,
@@ -36,6 +37,7 @@ pub struct RopeEditor {
     pub(crate) indentation: u8,
     pub(crate) history: EditorHistory,
     pub(crate) preedit: Option<PreeditState>,
+    pub(crate) bindings: EditBindings,
 }
 
 impl Display for RopeEditor {
@@ -58,11 +60,18 @@ impl RopeEditor {
             indentation,
             history,
             preedit: None,
+            bindings: EditBindings::default(),
         }
     }
 
     pub fn rope(&self) -> &Rope {
         &self.rope
+    }
+
+    /// Replace the editing-action chords this editor responds to in
+    /// [`TextEditor::process_key`].
+    pub fn set_edit_bindings(&mut self, bindings: EditBindings) {
+        self.bindings = bindings;
     }
 
     /// Insert or replace IME preedit text at the current cursor position.
@@ -311,6 +320,10 @@ impl TextEditor for RopeEditor {
         };
 
         Some((start, end))
+    }
+
+    fn edit_bindings(&self) -> &EditBindings {
+        &self.bindings
     }
 
     fn undo(&mut self) -> Option<TextSelection> {
