@@ -805,6 +805,10 @@ fn span_text_style(
         span_style.font_slant.into(),
     ));
     text_style.set_decoration_type(span_style.text_decoration.into());
+    text_style.set_decoration_style(span_style.text_decoration_style.into());
+    if let Some(decoration_color) = span_style.text_decoration_color {
+        text_style.set_decoration_color(decoration_color);
+    }
     if let Some(line_height) = line_height {
         text_style.set_height_override(true);
         text_style.set_height(line_height);
@@ -1074,3 +1078,5 @@ impl<'a> TextStyleExt for Span<'a> {
         &mut self.text_style_data
     }
 }
+
+impl<'a> MaybeExt for Span<'a> {}

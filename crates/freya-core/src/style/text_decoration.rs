@@ -1,4 +1,7 @@
-use freya_engine::prelude::SkTextDecoration;
+use freya_engine::prelude::{
+    SkTextDecoration,
+    TextDecorationStyle as SkTextDecorationStyle,
+};
 
 /// A line drawn through, under or over text.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -33,6 +36,47 @@ impl From<TextDecoration> for SkTextDecoration {
             TextDecoration::Underline => SkTextDecoration::UNDERLINE,
             TextDecoration::Overline => SkTextDecoration::OVERLINE,
             TextDecoration::LineThrough => SkTextDecoration::LINE_THROUGH,
+        }
+    }
+}
+
+/// How a [`TextDecoration`] line is drawn.
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[derive(Default, Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum TextDecorationStyle {
+    /// A single straight line. This is the default.
+    #[default]
+    Solid,
+    /// Two parallel straight lines.
+    Double,
+    /// A dotted line.
+    Dotted,
+    /// A dashed line.
+    Dashed,
+    /// A wavy line (e.g. diagnostic squiggles).
+    Wavy,
+}
+
+impl TextDecorationStyle {
+    pub fn pretty(&self) -> String {
+        match self {
+            Self::Solid => "solid".to_string(),
+            Self::Double => "double".to_string(),
+            Self::Dotted => "dotted".to_string(),
+            Self::Dashed => "dashed".to_string(),
+            Self::Wavy => "wavy".to_string(),
+        }
+    }
+}
+
+impl From<TextDecorationStyle> for SkTextDecorationStyle {
+    fn from(value: TextDecorationStyle) -> Self {
+        match value {
+            TextDecorationStyle::Solid => SkTextDecorationStyle::Solid,
+            TextDecorationStyle::Double => SkTextDecorationStyle::Double,
+            TextDecorationStyle::Dotted => SkTextDecorationStyle::Dotted,
+            TextDecorationStyle::Dashed => SkTextDecorationStyle::Dashed,
+            TextDecorationStyle::Wavy => SkTextDecorationStyle::Wavy,
         }
     }
 }

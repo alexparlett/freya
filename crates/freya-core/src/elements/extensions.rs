@@ -817,6 +817,19 @@ where
         self.get_text_style_data().text_decoration = Some(text_decoration.into());
         self
     }
+
+    /// Set how the [`TextDecoration`] line is drawn (solid, dotted, wavy, …).
+    /// See [`TextDecorationStyle`].
+    fn text_decoration_style(mut self, style: impl Into<TextDecorationStyle>) -> Self {
+        self.get_text_style_data().text_decoration_style = Some(style.into());
+        self
+    }
+
+    /// Set the color of the [`TextDecoration`] line. Defaults to the text color.
+    fn text_decoration_color(mut self, color: impl Into<Color>) -> Self {
+        self.get_text_style_data().text_decoration_color = Some(color.into());
+        self
+    }
 }
 
 /// Methods for styling an element's box: background, borders, shadows and corners.

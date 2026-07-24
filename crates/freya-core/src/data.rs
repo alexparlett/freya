@@ -46,7 +46,10 @@ use crate::{
         scale::Scale,
         shadow::Shadow,
         text_align::TextAlign,
-        text_decoration::TextDecoration,
+        text_decoration::{
+            TextDecoration,
+            TextDecorationStyle,
+        },
         text_height::TextHeightBehavior,
         text_overflow::TextOverflow,
         text_shadow::TextShadow,
@@ -128,6 +131,9 @@ pub struct TextStyleState {
     pub text_overflow: TextOverflow,
     pub text_shadows: Vec<TextShadow>,
     pub text_decoration: TextDecoration,
+    pub text_decoration_style: TextDecorationStyle,
+    /// Color of the decoration line; `None` paints it with the text color.
+    pub text_decoration_color: Option<Color>,
     pub font_slant: FontSlant,
     pub font_weight: FontWeight,
     pub font_width: FontWidth,
@@ -144,6 +150,8 @@ impl Default for TextStyleState {
             text_overflow: TextOverflow::default(),
             text_shadows: Vec::new(),
             text_decoration: TextDecoration::default(),
+            text_decoration_style: TextDecorationStyle::default(),
+            text_decoration_color: None,
             font_slant: FontSlant::default(),
             font_weight: FontWeight::default(),
             font_width: FontWidth::default(),
@@ -160,6 +168,8 @@ impl TextStyleState {
         let text_overflow = data.text_overflow.clone().unwrap_or_default();
         let text_shadows = data.text_shadows.clone();
         let text_decoration = data.text_decoration.unwrap_or_default();
+        let text_decoration_style = data.text_decoration_style.unwrap_or_default();
+        let text_decoration_color = data.text_decoration_color;
 
         // Font values can be inherited
         let font_size = data.font_size.unwrap_or(parent.font_size);
@@ -176,6 +186,8 @@ impl TextStyleState {
             text_overflow,
             text_shadows,
             text_decoration,
+            text_decoration_style,
+            text_decoration_color,
             font_size,
             font_slant,
             font_weight,
@@ -217,6 +229,8 @@ pub struct TextStyleData {
     pub text_overflow: Option<TextOverflow>,
     pub text_shadows: Vec<TextShadow>,
     pub text_decoration: Option<TextDecoration>,
+    pub text_decoration_style: Option<TextDecorationStyle>,
+    pub text_decoration_color: Option<Color>,
     pub font_slant: Option<FontSlant>,
     pub font_weight: Option<FontWeight>,
     pub font_width: Option<FontWidth>,
