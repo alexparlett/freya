@@ -68,7 +68,7 @@ pub fn get_scroll_position_from_wheel(
     viewport_size: f32,
     scroll_position: f32,
 ) -> i32 {
-    if viewport_size >= inner_size {
+    if !is_scrollable(inner_size, viewport_size) {
         return 0;
     }
 
@@ -117,17 +117,22 @@ pub fn get_container_sizes(size: Size) -> (Size, Size) {
     }
 }
 
+/// Whether an axis can scroll: its content (`inner_size`) is larger than the viewport
+/// (`viewport_size`) showing it. A zero or unmeasured viewport counts as not-yet-scrollable.
+/// The single overflow test every scroll helper (scrollbar visibility, wheel/cursor clamping,
+/// wheel latching) shares.
+#[doc(hidden)]
+pub fn is_scrollable(inner_size: f32, viewport_size: f32) -> bool {
+    viewport_size > 0. && viewport_size < inner_size
+}
+
 #[doc(hidden)]
 pub fn is_scrollbar_visible(
     is_scrollbar_enabled: bool,
     inner_size: f32,
     viewport_size: f32,
 ) -> bool {
-    if is_scrollbar_enabled {
-        viewport_size > 0. && viewport_size < inner_size
-    } else {
-        false
-    }
+    is_scrollbar_enabled && is_scrollable(inner_size, viewport_size)
 }
 
 const MIN_SCROLLBAR_SIZE: f32 = 50.0;
@@ -138,7 +143,7 @@ pub fn get_scrollbar_pos_and_size(
     viewport_size: f32,
     scroll_position: f32,
 ) -> (f32, f32) {
-    if viewport_size >= inner_size {
+    if !is_scrollable(inner_size, viewport_size) {
         return (0.0, inner_size);
     }
 
@@ -163,7 +168,7 @@ pub fn get_scroll_position_from_cursor(
     inner_size: f32,
     viewport_size: f32,
 ) -> i32 {
-    if viewport_size >= inner_size {
+    if !is_scrollable(inner_size, viewport_size) {
         return 0;
     }
 
@@ -238,4 +243,20 @@ pub fn handle_key_event(
         _ => return None,
     };
     Some((x, y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_scrollable;
+
+    #[test]
+    fn is_scrollable_needs_measured_overflow() {
+        // Content larger than the viewport showing it: there is something to scroll to.
+        assert!(is_scrollable(200., 100.));
+        // Content that fits (equal or smaller) than the viewport: nothing to scroll.
+        assert!(!is_scrollable(100., 100.));
+        assert!(!is_scrollable(80., 100.));
+        // An unmeasured (zero) viewport reads as not-yet-scrollable, even with content.
+        assert!(!is_scrollable(200., 0.));
+    }
 }

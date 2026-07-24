@@ -29,6 +29,7 @@ use crate::scrollviews::{
         get_scroll_position_from_wheel,
         get_scrollbar_pos_and_size,
         handle_key_event,
+        is_scrollable,
         is_scrollbar_visible,
     },
     use_scroll_controller,
@@ -410,8 +411,8 @@ impl Component for ScrollView {
             // to the wheel or it would dead-zone the ancestor under the cursor.
             else if contain_wheel {
                 let size = size.read();
-                let overflows = size.inner_sizes.height > size.area.height()
-                    || size.inner_sizes.width > size.area.width();
+                let overflows = is_scrollable(size.inner_sizes.height, size.area.height())
+                    || is_scrollable(size.inner_sizes.width, size.area.width());
                 if overflows {
                     e.stop_propagation();
                 }

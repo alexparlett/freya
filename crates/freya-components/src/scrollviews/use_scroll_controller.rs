@@ -148,6 +148,11 @@ pub struct ScrollController {
     /// so reading via `get_scroll` inside a reactive effect would subscribe the effect to the scroll
     /// and loop it against its own write.
     scroll: State<(i32, i32)>,
+    /// The scrollable's last content (inner) size `(width, height)`, refreshed every layout by the
+    /// scrollable via [`use_apply`](Self::use_apply). Paired with [`viewport`](Self::viewport) it
+    /// answers [`is_scrollable`](Self::is_scrollable), so a consumer holding the controller can gate
+    /// UI on whether the area actually overflows, without measuring it a second time.
+    inner: State<(f32, f32)>,
 }
 
 impl From<ScrollController> for (i32, i32) {
@@ -182,6 +187,7 @@ impl ScrollController {
             get_scroll: State::create(Callback::new(move |_| *scroll.read())),
             viewport: State::create(Area::default()),
             scroll,
+            inner: State::create((0., 0.)),
         }
     }
     /// Builds a controller from externally owned state, letting the caller manage its storage.
@@ -198,12 +204,16 @@ impl ScrollController {
             get_scroll,
             viewport: State::create(Area::default()),
             scroll: State::create((0, 0)),
+            inner: State::create((0., 0.)),
         }
     }
 
     /// Applies any pending requests against the given content size. Called by the scrollable on every layout.
     pub fn use_apply(&mut self, width: f32, height: f32) {
         let _ = self.notifier.read();
+        // Retain the content size so `is_scrollable` can compare it against the viewport. Guarded
+        // so an unchanged layout doesn't notify overflow subscribers.
+        self.inner.set_if_modified((width, height));
         for request in self.requests.write().drain(..) {
             match request {
                 ScrollRequest {
@@ -275,6 +285,24 @@ impl ScrollController {
     /// every layout so [`scroll_to_item`](Self::scroll_to_item) can reveal a target against it.
     pub fn set_viewport(&mut self, viewport: Area) {
         self.viewport.set_if_modified(viewport);
+    }
+
+    /// Whether the scrollable overflows its viewport along `direction`, i.e. there is content to
+    /// scroll to on that axis. Reads the content size and viewport the scrollable last reported
+    /// (via [`use_apply`](Self::use_apply) / [`set_viewport`](Self::set_viewport)) and subscribes
+    /// the caller, so a sibling can reactively show or hide a scroll affordance as the area's
+    /// content grows and shrinks. Unmeasured (zero-viewport) reads as not scrollable.
+    pub fn is_scrollable(&self, direction: Direction) -> bool {
+        let (inner_width, inner_height) = *self.inner.read();
+        let viewport = *self.viewport.read();
+        match direction {
+            Direction::Horizontal => {
+                crate::scrollviews::shared::is_scrollable(inner_width, viewport.width())
+            }
+            Direction::Vertical => {
+                crate::scrollviews::shared::is_scrollable(inner_height, viewport.height())
+            }
+        }
     }
 
     /// Scrolls the minimum amount needed to bring `item` fully into view, on whichever axes it
