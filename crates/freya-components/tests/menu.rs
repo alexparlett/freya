@@ -339,3 +339,44 @@ pub fn menu_container_standalone() {
         "Item 3"
     );
 }
+
+#[test]
+pub fn menu_button_disabled_no_click() {
+    fn menu_app() -> impl IntoElement {
+        let mut show_menu = use_state(|| true);
+        let mut clicked = use_state(|| false);
+
+        rect()
+            .child(label().text(format!("Clicked: {}", clicked())))
+            .maybe_child(show_menu().then(|| {
+                Menu::new()
+                    .on_close(move |_| show_menu.set(false))
+                    .child(
+                        MenuButton::new()
+                            .child("Open")
+                            .enabled(false)
+                            .on_press(move |_| clicked.set(true)),
+                    )
+                    .child(MenuButton::new().child("Save"))
+            }))
+    }
+
+    let mut test = launch_test(menu_app);
+    test.sync_and_update();
+
+    // Clicking a disabled button leaves the flag untouched: its press handler is never wired.
+    test.click_cursor((50.0, 35.0));
+
+    let status_label = test
+        .find(|node, element| {
+            Label::try_downcast(element)
+                .filter(|l| l.text.starts_with("Clicked:"))
+                .map(|_| node)
+        })
+        .unwrap();
+
+    assert_eq!(
+        Label::try_downcast(&*status_label.element()).unwrap().text,
+        "Clicked: false"
+    );
+}

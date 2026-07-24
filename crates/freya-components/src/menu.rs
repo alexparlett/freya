@@ -378,6 +378,7 @@ pub struct MenuItem {
     on_press: Option<EventHandler<Event<PressEventData>>>,
     on_pointer_enter: Option<EventHandler<Event<PointerEventData>>>,
     selected: bool,
+    enabled: bool,
     padding: Gaps,
     key: DiffKey,
 }
@@ -390,6 +391,7 @@ impl Default for MenuItem {
             on_press: None,
             on_pointer_enter: None,
             selected: false,
+            enabled: true,
             padding: (6.0, 12.0).into(),
             key: DiffKey::None,
         }
@@ -425,6 +427,13 @@ impl MenuItem {
 
     pub fn selected(mut self, selected: bool) -> Self {
         self.selected = selected;
+        self
+    }
+
+    /// Whether the item is interactive. A disabled item renders dimmed, never highlights on
+    /// hover, drops its press handler, and is not focusable.
+    pub fn enabled(mut self, enabled: impl Into<bool>) -> Self {
+        self.enabled = enabled.into();
         self
     }
 
@@ -464,16 +473,17 @@ impl ComponentOwned for MenuItem {
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
         let MenuGroup { group_id } = use_consume::<MenuGroup>();
+        let enabled = self.enabled;
 
         let background = if self.selected {
             theme.select_background
-        } else if hovering() {
+        } else if hovering() && enabled {
             theme.hover_background
         } else {
             theme.background
         };
 
-        let border = if focus() == Focus::Keyboard {
+        let border = if enabled && focus() == Focus::Keyboard {
             Border::new()
                 .fill(theme.select_border_fill)
                 .width(2.)
@@ -509,7 +519,7 @@ impl ComponentOwned for MenuItem {
         rect()
             .a11y_role(AccessibilityRole::MenuItem)
             .a11y_id(a11y_id)
-            .a11y_focusable(true)
+            .a11y_focusable(enabled)
             .a11y_member_of(group_id)
             .min_width(Size::px(105.))
             .width(Size::fill_minimum())
@@ -519,12 +529,15 @@ impl ComponentOwned for MenuItem {
             .background(background)
             .border(border)
             .color(theme.color)
+            // Fade the whole row toward the menu background when disabled. Opacity (not a
+            // colour tint) so it reads as muted on light and dark themes alike.
+            .maybe(!enabled, |el| el.opacity(0.5))
             .text_align(TextAlign::Start)
             .main_align(Alignment::Center)
             .overflow(Overflow::Clip)
             .on_pointer_enter(on_pointer_enter)
             .on_pointer_leave(on_pointer_leave)
-            .on_press(on_press)
+            .maybe(enabled, |el| el.on_press(on_press))
             .children(self.children)
     }
 
@@ -545,12 +558,25 @@ impl ComponentOwned for MenuItem {
 ///         .child("Item")
 /// }
 /// ```
-#[derive(Default, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MenuButton {
     pub(crate) theme: Option<MenuItemThemePartial>,
     children: Vec<Element>,
     on_press: Option<EventHandler<Event<PressEventData>>>,
+    enabled: bool,
     key: DiffKey,
+}
+
+impl Default for MenuButton {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            children: Vec::new(),
+            on_press: None,
+            enabled: true,
+            key: DiffKey::None,
+        }
+    }
 }
 
 impl ChildrenExt for MenuButton {
@@ -575,6 +601,13 @@ impl MenuButton {
         self
     }
 
+    /// Whether the button is interactive. A disabled button renders dimmed and does nothing on
+    /// press.
+    pub fn enabled(mut self, enabled: impl Into<bool>) -> Self {
+        self.enabled = enabled.into();
+        self
+    }
+
     /// Set a theme override for the inner [`MenuItem`].
     pub fn theme(mut self, theme: MenuItemThemePartial) -> Self {
         self.theme = Some(theme);
@@ -589,6 +622,7 @@ impl ComponentOwned for MenuButton {
 
         MenuItem::new()
             .map(self.theme, |el, theme| el.theme(theme))
+            .enabled(self.enabled)
             .on_pointer_enter(move |_| close_menus_until(&mut menus, parent_menu_id))
             .map(self.on_press, |el, on_press| el.on_press(on_press))
             .children(self.children)
