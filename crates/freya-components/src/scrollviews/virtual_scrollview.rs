@@ -1,6 +1,9 @@
 use std::{
     ops::Range,
-    time::Duration,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use freya_core::prelude::*;
@@ -19,6 +22,7 @@ use crate::scrollviews::{
     ScrollThumb,
     shared::{
         Axis,
+        WheelGestureClock,
         get_container_sizes,
         get_corrected_scroll_position,
         get_scroll_position_from_cursor,
@@ -373,6 +377,7 @@ impl<D: PartialEq + 'static, B: Fn(usize, &D) -> Element + 'static> Component
         let scroll_with_arrows = self.scroll_with_arrows;
         let invert_scroll_wheel = self.invert_scroll_wheel;
         let wheel_axis_lock = self.wheel_axis_lock;
+        let wheel_gesture_clock = WheelGestureClock::get();
 
         let on_capture_global_pointer_press = move |e: Event<PointerEventData>| {
             if clicking_scrollbar.read().is_some() {
@@ -387,6 +392,8 @@ impl<D: PartialEq + 'static, B: Fn(usize, &D) -> Element + 'static> Component
         };
 
         let on_wheel = move |e: Event<WheelEventData>| {
+            // Keep the shared wheel-gesture clock honest for latching descendants.
+            wheel_gesture_clock.advance(Instant::now());
             // Only invert direction on deviced-sourced wheel events
             let invert_direction = e.source == WheelSource::Device
                 && (*pressing_shift.read() || invert_scroll_wheel)

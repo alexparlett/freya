@@ -1,4 +1,7 @@
-use std::time::Duration;
+use std::time::{
+    Duration,
+    Instant,
+};
 
 use freya_core::prelude::*;
 use freya_sdk::timeout::use_timeout;
@@ -19,6 +22,7 @@ use crate::scrollviews::{
     ScrollThumb,
     shared::{
         Axis,
+        WheelGestureClock,
         get_container_sizes,
         get_corrected_scroll_position,
         get_scroll_position_from_cursor,
@@ -75,6 +79,8 @@ pub struct ScrollView {
     invert_scroll_wheel: bool,
     drag_scrolling: bool,
     wheel_axis_lock: Option<f32>,
+    contain_wheel: bool,
+    latch_wheel: bool,
     key: DiffKey,
 }
 
@@ -106,6 +112,8 @@ impl Default for ScrollView {
             invert_scroll_wheel: false,
             drag_scrolling: true,
             wheel_axis_lock: None,
+            contain_wheel: false,
+            latch_wheel: false,
             key: DiffKey::None,
         }
     }
@@ -171,6 +179,34 @@ impl ScrollView {
         self
     }
 
+    /// Contains wheel scrolling to this scroll view: while the cursor is over it and its
+    /// content overflows, wheel events never chain to an ancestor scrollable, not even once
+    /// this view has hit the end of its range (by default the unconsumed remainder bubbles up
+    /// and the ancestor takes over). A view whose content fits has nothing to scroll, so it
+    /// stays transparent to the wheel. The CSS `overscroll-behavior: contain` analogue, for
+    /// embedded scroll regions where the spill-over reads as a double scroll. See
+    /// [`latch_wheel`](Self::latch_wheel) for the gesture-scoped alternative.
+    pub fn contain_wheel(mut self) -> Self {
+        self.contain_wheel = true;
+        self
+    }
+
+    /// Latches wheel gestures to this scroll view, the macOS/AppKit trackpad convention. The
+    /// scroll target is chosen at gesture start: if this view receives a gesture's first event
+    /// and can move in its direction, the whole gesture stays here, including past the end of
+    /// the range (no mid-gesture hand-off to an ancestor scrollable). Otherwise the whole
+    /// gesture passes through untouched, so joining a gesture already in flight (the cursor
+    /// drifting over this view mid-gesture) never steals it, and chaining only happens on a
+    /// new gesture that starts with this view already at its end. Gestures are bounded by the
+    /// shared wheel-gesture clock (events closer together than its window belong to the same
+    /// gesture, momentum tails included); slow discrete mouse-wheel ticks fall outside the
+    /// window and so collapse to plain per-tick chaining. The middle ground between default
+    /// chaining and [`contain_wheel`](Self::contain_wheel)'s hard hover trap.
+    pub fn latch_wheel(mut self) -> Self {
+        self.latch_wheel = true;
+        self
+    }
+
     /// Caps the width of the scroll view.
     pub fn max_width(mut self, max_width: impl Into<Size>) -> Self {
         self.layout.maximum_width = max_width.into();
@@ -210,6 +246,12 @@ impl Component for ScrollView {
         let direction = layout.direction;
         let drag_scrolling = self.drag_scrolling;
         let wheel_axis_lock = self.wheel_axis_lock;
+        let contain_wheel = self.contain_wheel;
+        let latch_wheel = self.latch_wheel;
+        let wheel_gesture_clock = WheelGestureClock::get();
+        // This view's latch decision for a wheel gesture, keyed by the gesture's identity.
+        // Only ever peeked, so handler writes never re-render the view per wheel tick.
+        let mut latch = use_state(|| None::<(Instant, bool)>);
 
         scroll_controller.use_apply(
             size.read().inner_sizes.width,
@@ -297,6 +339,45 @@ impl Component for ScrollView {
                 }
             }
 
+            // Gesture latching: a gesture belongs to the view that received its FIRST event
+            // (`gesture == now`) and could move in its direction; every other latching view
+            // passes the whole gesture through untouched, including views the gesture only
+            // reaches mid-flight. A latched gesture is consumed below even once it pins at an
+            // end. Plain views still advance the shared clock so in-flight gestures that start
+            // over them are recognisable.
+            if latch_wheel {
+                let now = Instant::now();
+                let gesture = wheel_gesture_clock.advance(now);
+                let decision = *latch.peek();
+                let latched = match decision {
+                    Some((owned, latched)) if owned == gesture => latched,
+                    _ => {
+                        let latched = gesture == now && {
+                            let s = size.read();
+                            get_scroll_position_from_wheel(
+                                y_movement,
+                                s.inner_sizes.height,
+                                s.area.height(),
+                                corrected_scrolled_y,
+                            ) != corrected_scrolled_y as i32
+                                || get_scroll_position_from_wheel(
+                                    x_movement,
+                                    s.inner_sizes.width,
+                                    s.area.width(),
+                                    corrected_scrolled_x,
+                                ) != corrected_scrolled_x as i32
+                        };
+                        latch.set(Some((gesture, latched)));
+                        latched
+                    }
+                };
+                if !latched {
+                    return;
+                }
+            } else {
+                wheel_gesture_clock.advance(Instant::now());
+            }
+
             // Vertical scroll
             let scroll_position_y = get_scroll_position_from_wheel(
                 y_movement,
@@ -318,6 +399,23 @@ impl Component for ScrollView {
             scroll_controller.scroll_to_x(scroll_position_x).then(|| {
                 e.stop_propagation();
             });
+            // A latched gesture owns the event end-to-end (reaching here means this gesture
+            // bound to this view), so swallow it even once the position pins at an end.
+            if latch_wheel {
+                e.stop_propagation();
+            }
+            // Containment: swallow the event even when neither axis moved (position at an end)
+            // so the leftover delta cannot chain to an ancestor scrollable, but only while the
+            // content actually overflows: a view with nothing to scroll must stay transparent
+            // to the wheel or it would dead-zone the ancestor under the cursor.
+            else if contain_wheel {
+                let size = size.read();
+                let overflows = size.inner_sizes.height > size.area.height()
+                    || size.inner_sizes.width > size.area.width();
+                if overflows {
+                    e.stop_propagation();
+                }
+            }
             timeout.reset();
         };
 

@@ -221,3 +221,78 @@ pub fn scroll_view_drag_scrolling_horizontal() {
     assert!(content[2].is_visible());
     assert!(content[3].is_visible());
 }
+
+#[test]
+pub fn scroll_view_wheel_latching() {
+    use std::time::Duration;
+
+    // Longer than the shared wheel-gesture window, so the next event starts a new gesture.
+    fn end_gesture() {
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    fn latching_app() -> impl IntoElement {
+        // A latched 200px inner scroll view (400px of content) at the top of an outer scroll
+        // view whose own content (200 + 3x200 = 800px) overflows the 500px viewport.
+        ScrollView::new()
+            .child(
+                ScrollView::new()
+                    .height(Size::px(200.))
+                    .latch_wheel()
+                    .child(rect().height(Size::px(200.)).width(Size::fill()))
+                    .child(rect().height(Size::px(200.)).width(Size::fill())),
+            )
+            .child(rect().height(Size::px(200.)).width(Size::fill()))
+            .child(rect().height(Size::px(200.)).width(Size::fill()))
+            .child(rect().height(Size::px(200.)).width(Size::fill()))
+    }
+
+    let mut test = launch_test(latching_app);
+    let outer = test
+        .find(|node, element| {
+            Rect::try_downcast(element)
+                .filter(|rect| rect.accessibility.builder.role() == AccessibilityRole::ScrollView)
+                .map(move |_| node)
+        })
+        .unwrap();
+    let outer_content = outer.children()[0].children()[0].children();
+    let inner_content = outer_content[0].children()[0].children()[0].children();
+
+    // Initial state: the inner view shows only its first item; the outer's last item is
+    // below the fold.
+    assert!(inner_content[0].is_visible());
+    assert!(!inner_content[1].is_visible());
+    assert!(!outer_content[3].is_visible());
+
+    // A gesture starting over the inner view (which can move down) latches to it: the inner
+    // scrolls to its end, and the surplus of the same gesture must NOT chain to the outer.
+    test.scroll((100., 100.), (0., -200.));
+    assert!(inner_content[1].is_visible());
+    assert!(!outer_content[3].is_visible());
+    test.scroll((100., 100.), (0., -300.)); // same gesture, inner already at its end
+    assert!(!outer_content[3].is_visible());
+
+    // A NEW gesture starting with the inner at its end passes through wholesale, so the
+    // outer takes over.
+    end_gesture();
+    test.scroll((100., 100.), (0., -300.));
+    assert!(outer_content[3].is_visible());
+
+    // Reset: scroll the outer back up (the inner sits off screen above), then latch a new
+    // gesture to the inner to bring it back to its top.
+    end_gesture();
+    test.scroll((100., 250.), (0., 300.));
+    end_gesture();
+    test.scroll((100., 100.), (0., 200.));
+    assert!(!inner_content[1].is_visible());
+    assert!(!outer_content[3].is_visible());
+
+    // A gesture starting over the OUTER (below the inner) belongs to it: when the scrolled
+    // content brings the inner under the pointer mid-gesture, the inner must not steal the
+    // gesture even though it could scroll, so the outer keeps moving and the inner stays put.
+    end_gesture();
+    test.scroll((100., 250.), (0., -150.));
+    test.scroll((100., 25.), (0., -150.)); // now over the inner, same gesture
+    assert!(!inner_content[1].is_visible());
+    assert!(outer_content[3].is_visible());
+}
