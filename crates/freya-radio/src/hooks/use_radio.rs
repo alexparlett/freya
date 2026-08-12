@@ -310,6 +310,32 @@ where
             value,
         }
     }
+
+    /// Whether the state behind this station is still alive.
+    ///
+    /// A `RadioStation` is `Copy` and outlives nothing on its own: the value belongs to the scope
+    /// that created it with [`use_init_radio_station`], and a handle kept past that scope's
+    /// unmount panics on read or write.
+    ///
+    /// Work spawned with [`spawn_forever`](freya_core::prelude::spawn_forever) is what has to
+    /// ask, since it is designed to outlive the component that started it and may come back to a
+    /// subtree that is gone. Cancelling the task on unmount is the usual answer; this is the one
+    /// for work that must finish regardless and only needs to know whether there is anybody left
+    /// to notify.
+    ///
+    /// ```rust, ignore
+    /// # use freya::prelude::*;
+    /// # use freya::radio::*;
+    /// spawn_forever(async move {
+    ///     let answer = fetch().await;
+    ///     if station.is_alive() {
+    ///         station.write_channel(Channel::Rows).apply(answer);
+    ///     }
+    /// });
+    /// ```
+    pub fn is_alive(&self) -> bool {
+        self.value.is_alive()
+    }
 }
 
 pub struct RadioAntenna<Value, Channel>

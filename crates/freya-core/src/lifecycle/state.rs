@@ -11,6 +11,7 @@ use std::{
 
 use generational_box::{
     AnyStorage,
+    BorrowError,
     GenerationalBox,
     UnsyncStorage,
 };
@@ -391,6 +392,46 @@ impl<T> State<T> {
                 panic!("Writing to the State failed because it is already borrowed.\n{e}")
             }
         }
+    }
+
+    /// Whether the value behind this state is still alive.
+    ///
+    /// A `State` is owned by the scope that created it, and every handle to it is `Copy`. A
+    /// handle held past that scope's unmount is not dangling in the unsafe sense, but reading or
+    /// writing through it panics.
+    ///
+    /// Long-lived work is what needs to ask. A task spawned with [`spawn_forever`] outlives the
+    /// component that started it by design, and when it finishes it may find the subtree whose
+    /// state it meant to update already gone. Cancelling such a task on unmount is the usual
+    /// answer; this is the other one, for work that must still run to completion and only wants
+    /// to know whether anyone is left to tell.
+    ///
+    /// ```rust,no_run
+    /// # use freya::prelude::*;
+    /// # async fn fetch() -> u32 { 0 }
+    /// # fn app() -> impl IntoElement {
+    /// let mut rows = use_state(|| 0);
+    /// spawn_forever(async move {
+    ///     let answer = fetch().await;
+    ///     if rows.is_alive() {
+    ///         rows.set(answer);
+    ///     }
+    /// });
+    /// # rect()
+    /// # }
+    /// ```
+    ///
+    /// [`spawn_forever`]: crate::prelude::spawn_forever
+    /// A state that is merely borrowed right now is still alive, so only the dropped case
+    /// answers `false`.
+    ///
+    /// The `'static` bound is spelled out because, unlike the reads and writes around it, this
+    /// returns a plain `bool` and so carries no implied bound from its return type.
+    pub fn is_alive(&self) -> bool
+    where
+        T: 'static,
+    {
+        !matches!(self.key.try_read(), Err(BorrowError::Dropped(_)))
     }
 
     /// Get a mutable reference without requiring a mutable borrow of the State.
