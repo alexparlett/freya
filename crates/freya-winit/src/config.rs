@@ -220,7 +220,7 @@ impl WindowConfig {
     /// Mirrors the API proposed for winit in
     /// [PR #4466](https://github.com/rust-windowing/winit/pull/4466)
     /// (`WindowAttributesMacOS::with_traffic_light_inset`), implemented here in
-    /// [`crate::traffic_light`] until it lands upstream. Usually combined with a
+    /// this crate's private `traffic_light` module until it lands upstream. Usually combined with a
     /// transparent titlebar + full-size content view + hidden title (set via
     /// [`with_window_attributes`](Self::with_window_attributes) and winit's
     /// `WindowAttributesExtMacOS`).

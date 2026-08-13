@@ -119,6 +119,21 @@ pub trait WinitPlatformExt {
     /// ```
     fn set_window_parent(&self, child: WindowId, parent: Option<WindowId>);
 
+    /// Set the title of a window, also updating its accessibility label.
+    ///
+    /// If `window_id` is `None`, the title will be applied to the current window.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use freya::prelude::*;
+    ///
+    /// fn rename_current_window() {
+    ///     Platform::get().set_window_title(None, "New Title");
+    /// }
+    /// ```
+    fn set_window_title(&self, window_id: Option<WindowId>, title: impl Into<String>);
+
     /// Execute a callback with mutable access to a [`Window`].
     ///
     /// If `window_id` is `None`, the callback will be executed on the current window.
@@ -129,16 +144,7 @@ pub trait WinitPlatformExt {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use freya::{
-    ///     prelude::*,
-    ///     winit::window::WindowId,
-    /// };
-    ///
-    /// fn set_window_title(window_id: Option<WindowId>, title: &'static str) {
-    ///     Platform::get().with_window(window_id, move |window| {
-    ///         window.set_title(title);
-    ///     });
-    /// }
+    /// use freya::prelude::*;
     ///
     /// fn minimize_current_window() {
     ///     Platform::get().with_window(None, |window| {
@@ -236,6 +242,16 @@ impl WinitPlatformExt for Platform {
         self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
             NativeWindowErasedEventAction::RendererCallback(Box::new(move |_, ctx| {
                 ctx.set_window_parent(child, parent);
+            })),
+        ))));
+    }
+
+    fn set_window_title(&self, window_id: Option<WindowId>, title: impl Into<String>) {
+        let title = title.into();
+        self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
+            NativeWindowErasedEventAction::RendererCallback(Box::new(move |id, context| {
+                let app = context.windows.get_mut(&window_id.unwrap_or(id)).unwrap();
+                app.set_title(&title);
             })),
         ))));
     }

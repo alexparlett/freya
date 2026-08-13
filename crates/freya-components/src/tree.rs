@@ -324,7 +324,7 @@ impl Component for TreeItem {
 /// children only when it opens. So `length` is "how many rows are on screen if you scrolled through
 /// all of them", and the builder is asked for one row at a time, as [`VirtualScrollView`] reaches it.
 ///
-/// Selection and keyboard movement are the caller's, as they are for [`Table`](crate::Table): both
+/// Selection and keyboard movement are the caller's, as they are for [`Table`](crate::table::Table): both
 /// are about which row means something, which the tree cannot know.
 pub struct Tree<D, B: Fn(VirtualItem, &D) -> Element> {
     pub theme: Option<TreeThemePartial>,

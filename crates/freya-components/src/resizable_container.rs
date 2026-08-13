@@ -885,10 +885,10 @@ impl Component for ResizableHandle {
                     // displacement keeps growing: that gap is how far past the floor the user has
                     // pulled, and past the threshold it reads as "collapse this" rather than "this
                     // is as far as it goes".
-                    if let Some(blocked) = outcome.blocked {
-                        if pixel_displacement.abs() >= ResizableContext::COLLAPSE_OVER_DRAG {
-                            registry.collapse_request = Some(blocked);
-                        }
+                    if let Some(blocked) = outcome.blocked
+                        && pixel_displacement.abs() >= ResizableContext::COLLAPSE_OVER_DRAG
+                    {
+                        registry.collapse_request = Some(blocked);
                     }
 
                     if outcome.changed {

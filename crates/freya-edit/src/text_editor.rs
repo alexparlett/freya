@@ -267,12 +267,26 @@ pub trait TextEditor {
         pos - line_char
     }
 
+    /// Last valid cursor position in `row`, before the line ending if it has one.
+    fn line_end_position(&self, row: usize) -> Option<usize> {
+        let line = self.line(row)?;
+        let row_start = self.char_to_utf16_cu(self.line_to_char(row));
+        let row_end = row_start + line.utf16_len();
+        if row + 1 == self.len_lines() {
+            Some(row_end)
+        } else {
+            Some(self.grapheme_cluster_at(row_end - 1).start)
+        }
+    }
+
     /// Move the cursor to `row`, keeping `col` when possible and snapping to a
     /// grapheme cluster boundary.
     fn move_cursor_to_row(&mut self, row: usize, col: usize) {
-        let Some(line) = self.line(row) else { return };
+        let Some(last_position) = self.line_end_position(row) else {
+            return;
+        };
         let row_start = self.char_to_utf16_cu(self.line_to_char(row));
-        let col = col.min(line.utf16_len().saturating_sub(1));
+        let col = col.min(last_position - row_start);
         let pos = self.grapheme_cluster_at(row_start + col).start;
         self.selection_mut().move_to(pos);
     }

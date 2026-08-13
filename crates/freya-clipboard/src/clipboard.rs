@@ -73,8 +73,18 @@ pub trait ClipboardProvider {
 /// own display connection. It is the trade for images: no crate speaks the standard protocol
 /// *and* carries image data, and a second provider for text alone would put two connections on
 /// one selection.
+///
+/// # Android
+///
+/// There is no desktop clipboard to open, and arboard has no Android backend to build against, so
+/// on Android this is a context that never opens: [`new`](Self::new) answers
+/// [ClipboardError::NotAvailable] and the integration provides no provider at all, which is what
+/// every [Clipboard] call then reports. Reaching Android's own `ClipboardManager` means a JNI
+/// call through the activity, which belongs to whoever adds it, not to a stub.
+#[cfg(not(target_os = "android"))]
 pub struct ClipboardContext(arboard::Clipboard);
 
+#[cfg(not(target_os = "android"))]
 impl ClipboardContext {
     /// Open the desktop clipboard, or [ClipboardError::NotAvailable] where there is none.
     pub fn new() -> Result<Self, ClipboardError> {
@@ -84,6 +94,7 @@ impl ClipboardContext {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl ClipboardProvider for ClipboardContext {
     fn get_text(&mut self) -> Result<String, ClipboardError> {
         self.0.get_text().map_err(|_| ClipboardError::FailedToRead)
@@ -115,6 +126,41 @@ impl ClipboardProvider for ClipboardContext {
                 bytes: image.rgba.into(),
             })
             .map_err(|_| ClipboardError::FailedToSet)
+    }
+}
+
+/// See [ClipboardContext]'s Android section: a context that never opens.
+///
+/// The trait is still implemented because the integrations coerce a context to
+/// `Box<dyn ClipboardProvider>`, so the type has to satisfy it to compile; the impl is not
+/// reachable, since [`new`](Self::new) hands back no context to call it on.
+#[cfg(target_os = "android")]
+pub struct ClipboardContext;
+
+#[cfg(target_os = "android")]
+impl ClipboardContext {
+    /// Always [ClipboardError::NotAvailable] on Android.
+    pub fn new() -> Result<Self, ClipboardError> {
+        Err(ClipboardError::NotAvailable)
+    }
+}
+
+#[cfg(target_os = "android")]
+impl ClipboardProvider for ClipboardContext {
+    fn get_text(&mut self) -> Result<String, ClipboardError> {
+        Err(ClipboardError::NotAvailable)
+    }
+
+    fn set_text(&mut self, _contents: String) -> Result<(), ClipboardError> {
+        Err(ClipboardError::NotAvailable)
+    }
+
+    fn get_image(&mut self) -> Result<ClipboardImage, ClipboardError> {
+        Err(ClipboardError::NotAvailable)
+    }
+
+    fn set_image(&mut self, _image: ClipboardImage) -> Result<(), ClipboardError> {
+        Err(ClipboardError::NotAvailable)
     }
 }
 

@@ -190,7 +190,8 @@ impl Default for EditBindings {
 }
 
 impl EditBindings {
-    /// The default bindings as a static, backing [`TextEditor::edit_bindings`]'s
+    /// The default bindings as a static, backing
+    /// [`TextEditor::edit_bindings`](crate::text_editor::TextEditor::edit_bindings)'s
     /// default body.
     pub fn default_ref() -> &'static Self {
         static DEFAULT: LazyLock<EditBindings> = LazyLock::new(EditBindings::default);

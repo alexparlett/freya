@@ -1,6 +1,6 @@
 [package]
 name = "freya-clipboard"
-version = "0.4.1"
+version = "0.5.0-rc.2"
 edition = "2024"
 description = "Clipboard integration for Freya."
 license = "MIT"
@@ -14,10 +14,15 @@ categories = ["gui"]
 workspace = true
 
 [dependencies]
+freya-core = { workspace = true }
+
+# Not on Android: arboard has no backend for it and fails to compile against its `platform`
+# module. `ClipboardContext` is a context that never opens there instead.
+#
 # `wayland-data-control` so a Wayland session talks to the compositor directly instead of
 # reaching XWayland for a clipboard; arboard falls back to X11 where the protocol is missing.
+[target.'cfg(not(target_os = "android"))'.dependencies]
 arboard = { version = "3.6", features = ["wayland-data-control"] }
-freya-core = { workspace = true }
 
 [dev-dependencies]
 freya = { path = "../freya" }

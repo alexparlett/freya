@@ -74,8 +74,8 @@ pub enum BorderShape {
 /// region between its outer and inner edges, which is what makes the pattern possible at all.
 /// Two consequences, both deliberate: it uses one width for all four sides
 /// ([`BorderWidth::top`]), since a stroke has a single width, and it ignores
-/// [`CornerRadius::smoothing`](crate::style::CornerRadius): a squircle outline has no stroked
-/// equivalent.
+/// [`CornerRadius::smoothing`](crate::style::corner_radius::CornerRadius): a squircle outline
+/// has no stroked equivalent.
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[derive(Default, Clone, Copy, Debug, PartialEq)]
 pub enum BorderStyle {
