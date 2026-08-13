@@ -62,11 +62,7 @@ use crate::{
 /// }
 /// ```
 pub fn rect() -> Rect {
-    Rect {
-        element: RectElement::default(),
-        elements: Vec::default(),
-        key: DiffKey::None,
-    }
+    Rect::default()
 }
 
 #[derive(PartialEq, Clone)]
@@ -611,6 +607,7 @@ impl ElementExt for RectElement {
     }
 }
 
+#[derive(Default)]
 pub struct Rect {
     element: RectElement,
     elements: Vec<Element>,

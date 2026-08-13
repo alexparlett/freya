@@ -307,6 +307,36 @@ pub fn input_escape_unfocus_test() {
 }
 
 #[test]
+pub fn input_shift_wheel_scroll_test() {
+    fn scroll_app() -> impl IntoElement {
+        let value = use_state(String::new);
+
+        rect().child(Input::new(value).width(Size::px(150.)))
+    }
+
+    let mut test = launch_test(scroll_app);
+
+    // Focus and fill with text wider than the input
+    test.click_cursor((15.0, 15.0));
+    test.write_text("this is a very long text that overflows the input width");
+
+    let paragraph_x = |test: &TestingRunner| {
+        test.find(|node, element| {
+            Paragraph::try_downcast(element).map(|_| node.layout().area.min_x())
+        })
+        .unwrap()
+    };
+    let initial_x = paragraph_x(&test);
+
+    // Hold Shift and wheel over the input to scroll it horizontally while focused
+    test.press_key_with_modifiers(Key::Named(NamedKey::Shift), Modifiers::SHIFT);
+    test.scroll((75.0, 15.0), (0.0, -50.0));
+
+    let scrolled_x = paragraph_x(&test);
+    assert!(scrolled_x < initial_x);
+}
+
+#[test]
 pub fn input_auto_focus_test() {
     fn auto_focus_app() -> impl IntoElement {
         let value = use_state(String::new);

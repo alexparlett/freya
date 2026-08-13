@@ -259,7 +259,11 @@ impl Input {
     /// keystroke through to the global listeners behind the input.
     pub fn key_down_default(e: Event<KeyboardEventData>) -> bool {
         match &e.key {
-            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Escape) => true,
+            // `Shift` stays unclaimed: the ScrollView behind the input reads it to scroll
+            // horizontally.
+            Key::Named(NamedKey::Enter)
+            | Key::Named(NamedKey::Escape)
+            | Key::Named(NamedKey::Shift) => true,
             Key::Named(NamedKey::Tab) => false,
             _ => {
                 e.stop_propagation();

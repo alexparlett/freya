@@ -655,6 +655,10 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                             }
 
                             {
+                                let mut observer = self.plugins.tasks_poll_observer(
+                                    &app.window,
+                                    PluginHandle::new(&self.proxy),
+                                );
                                 let fut = std::pin::pin!(async {
                                     select! {
                                         events_chunk = app.events_receiver.next() => {
@@ -673,7 +677,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                                 _ => {}
                                             }
                                         },
-                                        _ = app.runner.handle_events().fuse() => {},
+                                        _ = app.runner.handle_events_with(&mut observer).fuse() => {},
                                     }
                                 });
 
@@ -690,6 +694,12 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                 }
                             }
 
+                            app.runner.handle_events_immediately_with(
+                                &mut self.plugins.tasks_poll_observer(
+                                    &app.window,
+                                    PluginHandle::new(&self.proxy),
+                                ),
+                            );
                             self.plugins.send(
                                 PluginEvent::StartedUpdatingTree {
                                     window: &app.window,
@@ -879,6 +889,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
         window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
+        let mut needs_recovery = false;
         if let Some(app) = &mut self.windows.get_mut(&window_id) {
             app.accessibility_adapter.process_event(&app.window, &event);
             match event {
@@ -904,6 +915,33 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     #[cfg(target_os = "macos")]
                     if let Some(traffic_lights) = &app.traffic_lights {
                         traffic_lights.reapply();
+                    }
+
+                    // Window switches (e.g. Alt+Tab) swallow key releases, so release held keys on focus loss.
+                    if !is_focused && !app.pressed_keys.is_empty() {
+                        let modifiers = winit_mappings::map_winit_modifiers(app.modifiers_state);
+                        let mut platform_events: Vec<_> = app
+                            .pressed_keys
+                            .drain(..)
+                            .map(|(key, code)| PlatformEvent::Keyboard {
+                                name: KeyboardEventName::KeyUp,
+                                key,
+                                code,
+                                modifiers,
+                            })
+                            .collect();
+                        let mut events_measurer_adapter = EventsMeasurerAdapter {
+                            scale_factor: app.effective_scale_factor(),
+                            tree: &mut app.tree,
+                        };
+                        let processed_events = events_measurer_adapter.run(
+                            &mut platform_events,
+                            &mut app.nodes_state,
+                            app.accessibility.focused_node_id(),
+                        );
+                        app.events_sender
+                            .unbounded_send(EventsChunk::Processed(processed_events))
+                            .unwrap();
                     }
                 }
                 WindowEvent::RedrawRequested => {
@@ -946,7 +984,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                             );
                         }
 
-                        app.driver.present(
+                        let present_result = app.driver.present(
                             app.window.inner_size().cast(),
                             &app.window,
                             |surface| {
@@ -991,6 +1029,13 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                 );
                             },
                         );
+                        if let Err(error) = present_result {
+                            tracing::warn!(
+                                "Graphics driver lost ({error:?}), rebuilding on the same window"
+                            );
+                            needs_recovery = true;
+                        }
+
                         self.plugins.send(
                             PluginEvent::AfterPresenting {
                                 window: &app.window,
@@ -1014,14 +1059,19 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                 app.process_accessibility_update(mode);
                             }
                             AccessibilityTask::Init => {
-                                let update = app.accessibility.init(&mut app.tree);
+                                let title = app.window.title();
+                                let update = app.accessibility.init(&mut app.tree, &title);
                                 app.platform
                                     .focused_accessibility_id
                                     .set_if_modified(update.focus);
                                 let node_id = app.accessibility.focused_node_id().unwrap();
                                 let layout_node = app.tree.layout.get(&node_id).unwrap();
-                                let focused_node =
-                                    AccessibilityTree::create_node(node_id, layout_node, &app.tree);
+                                let focused_node = AccessibilityTree::create_node(
+                                    node_id,
+                                    layout_node,
+                                    &app.tree,
+                                    &title,
+                                );
                                 app.window.set_ime_allowed(is_ime_role(focused_node.role()));
                                 app.platform
                                     .focused_accessibility_node
@@ -1048,7 +1098,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                             PluginHandle::new(&self.proxy),
                         );
 
-                        app.ticker_sender.send(()).ok();
+                        app.ticker_sender.notify();
 
                         self.plugins.send(
                             PluginEvent::AfterRedraw {
@@ -1061,7 +1111,12 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     });
                 }
                 WindowEvent::Resized(size) => {
-                    app.driver.resize(size);
+                    if let Err(error) = app.driver.resize(size) {
+                        tracing::warn!(
+                            "Graphics driver lost while resizing ({error:?}), rebuilding on the same window"
+                        );
+                        needs_recovery = true;
+                    }
 
                     // Filling the window (macOS zoom) or entering fullscreen *is* a resize,
                     // and winit has no event of its own for either, so this is where both
@@ -1144,6 +1199,12 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     let key = winit_mappings::map_winit_key(&event.logical_key);
                     let code = winit_mappings::map_winit_physical_key(&event.physical_key);
                     let modifiers = winit_mappings::map_winit_modifiers(app.modifiers_state);
+
+                    app.pressed_keys
+                        .retain(|(_, pressed_code)| *pressed_code != code);
+                    if event.state.is_pressed() {
+                        app.pressed_keys.push((key.clone(), code));
+                    }
 
                     self.plugins.send(
                         PluginEvent::KeyboardInput {
@@ -1395,6 +1456,29 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                 }
                 _ => {}
             }
+        }
+
+        // Rebuild on the same window.
+        if needs_recovery && let Some(mut app) = self.windows.remove(&window_id) {
+            // Drop the lost driver first to release its GPU surface.
+            drop(app.driver);
+            app.driver = GraphicsDriver::recover_reusing_window(
+                event_loop,
+                &app.window,
+                self.gpu_resource_cache_limit,
+                app.window_attributes.transparent,
+            );
+            tracing::info!("Recovered onto the {} driver", app.driver.name());
+            self.plugins.send(
+                PluginEvent::GraphicsDriverChanged {
+                    window: &app.window,
+                    graphics_driver: app.driver.name(),
+                    gpu_name: app.driver.gpu_name(),
+                },
+                PluginHandle::new(&self.proxy),
+            );
+            app.window.request_redraw();
+            self.windows.insert(window_id, app);
         }
     }
 }

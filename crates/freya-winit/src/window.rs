@@ -27,6 +27,10 @@ use futures_util::task::{
     ArcWake,
     waker,
 };
+use keyboard_types::{
+    Code,
+    Key,
+};
 use ragnarok::NodesState;
 use torin::prelude::{
     CursorPoint,
@@ -82,6 +86,7 @@ pub struct AppWindow {
     pub(crate) position: CursorPoint,
     pub(crate) mouse_state: ElementState,
     pub(crate) modifiers_state: ModifiersState,
+    pub(crate) pressed_keys: Vec<(Key, Code)>,
 
     pub(crate) events_receiver: futures_channel::mpsc::UnboundedReceiver<EventsChunk>,
     pub(crate) events_sender: futures_channel::mpsc::UnboundedSender<EventsChunk>,
@@ -127,15 +132,16 @@ fn clamp_custom_scale_factor(custom_scale_factor: f64) -> f64 {
 
 impl AppWindow {
     pub(crate) fn process_accessibility_update(&mut self, mode: Option<NavigationMode>) {
-        let update = self
-            .accessibility
-            .process_updates(&mut self.tree, &self.events_sender);
+        let title = self.window.title();
+        let update =
+            self.accessibility
+                .process_updates(&mut self.tree, &self.events_sender, &title);
         self.platform
             .focused_accessibility_id
             .set_if_modified(update.focus);
         let node_id = self.accessibility.focused_node_id().unwrap();
         let layout_node = self.tree.layout.get(&node_id).unwrap();
-        let focused_node = AccessibilityTree::create_node(node_id, layout_node, &self.tree);
+        let focused_node = AccessibilityTree::create_node(node_id, layout_node, &self.tree, &title);
         self.window
             .set_ime_allowed(is_ime_role(focused_node.role()));
         self.platform
@@ -154,6 +160,17 @@ impl AppWindow {
         if self.screen_reader.is_on() {
             self.accessibility_adapter.update_if_active(|| update);
         }
+    }
+
+    /// Set the window title and refresh the accessibility label of the root node.
+    pub fn set_title(&mut self, title: &str) {
+        if self.window.title() == title {
+            return;
+        }
+        self.window.set_title(title);
+        self.tree.accessibility_diff.add_or_update(NodeId::ROOT);
+        self.accessibility_tasks_for_next_render |= AccessibilityTask::ProcessUpdate { mode: None };
+        self.window.request_redraw();
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -369,6 +386,7 @@ impl AppWindow {
                 animation_clock: &animation_clock,
                 runner: &mut runner,
                 graphics_driver: driver.name(),
+                gpu_name: driver.gpu_name(),
             },
             PluginHandle::new(event_loop_proxy),
         );
@@ -383,6 +401,7 @@ impl AppWindow {
             mouse_state: ElementState::Released,
             position: CursorPoint::default(),
             modifiers_state: ModifiersState::default(),
+            pressed_keys: Vec::new(),
 
             events_receiver,
             events_sender,
