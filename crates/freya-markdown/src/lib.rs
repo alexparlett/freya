@@ -891,36 +891,36 @@ impl Component for MarkdownViewer {
                     if let Some(custom) = custom {
                         custom
                     } else {
-                    #[cfg(not(feature = "code-editor"))]
-                    let _ = &language;
-                    #[cfg(feature = "code-editor")]
-                    let element = CodeBlockEditor::new(
-                        move || Cow::Owned(code.clone()),
-                        language,
-                        self.language_resolver.clone(),
-                        code_font_size,
-                        self.code_editor_font_family.clone(),
-                    )
-                    .key(idx)
-                    .into();
-
-                    #[cfg(not(feature = "code-editor"))]
-                    let element = rect()
-                        .key(idx)
-                        .width(Size::fill())
-                        .background(background_code)
-                        .corner_radius(6.)
-                        .padding(Gaps::new_all(12.))
-                        .child(
-                            label()
-                                .text(code)
-                                .font_family(self.code_editor_font_family.clone())
-                                .font_size(code_font_size)
-                                .color(color_code),
+                        #[cfg(not(feature = "code-editor"))]
+                        let _ = &language;
+                        #[cfg(feature = "code-editor")]
+                        let element = CodeBlockEditor::new(
+                            move || Cow::Owned(code.clone()),
+                            language,
+                            self.language_resolver.clone(),
+                            code_font_size,
+                            self.code_editor_font_family.clone(),
                         )
+                        .key(idx)
                         .into();
 
-                    element
+                        #[cfg(not(feature = "code-editor"))]
+                        let element = rect()
+                            .key(idx)
+                            .width(Size::fill())
+                            .background(background_code)
+                            .corner_radius(6.)
+                            .padding(Gaps::new_all(12.))
+                            .child(
+                                label()
+                                    .text(code)
+                                    .font_family(self.code_editor_font_family.clone())
+                                    .font_size(code_font_size)
+                                    .color(color_code),
+                            )
+                            .into();
+
+                        element
                     }
                 }
                 MarkdownElement::List(list) => render_list(
