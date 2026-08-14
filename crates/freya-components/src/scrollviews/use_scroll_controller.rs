@@ -153,6 +153,14 @@ pub struct ScrollController {
     /// answers [`is_scrollable`](Self::is_scrollable), so a consumer holding the controller can gate
     /// UI on whether the area actually overflows, without measuring it a second time.
     inner: State<(f32, f32)>,
+    /// A [`scroll_to_offset`](Self::scroll_to_offset) that arrived before the scrollable had been
+    /// laid out, kept until [`use_apply`](Self::use_apply) can honour it.
+    ///
+    /// The retry belongs here rather than to the caller. A caller that wanted to retry would have to
+    /// *subscribe* to the viewport to learn when the layout landed, and the viewport moves whenever
+    /// an auto-hiding scrollbar appears or the area is resized: a reveal issued once on mount would
+    /// cost that caller a re-render on every scroll gesture for the life of the view.
+    pending: State<Option<(f32, f32, Direction)>>,
 }
 
 impl From<ScrollController> for (i32, i32) {
@@ -188,6 +196,7 @@ impl ScrollController {
             viewport: State::create(Area::default()),
             scroll,
             inner: State::create((0., 0.)),
+            pending: State::create(None),
         }
     }
     /// Builds a controller from externally owned state, letting the caller manage its storage.
@@ -205,12 +214,21 @@ impl ScrollController {
             viewport: State::create(Area::default()),
             scroll: State::create((0, 0)),
             inner: State::create((0., 0.)),
+            pending: State::create(None),
         }
     }
 
     /// Applies any pending requests against the given content size. Called by the scrollable on every layout.
     pub fn use_apply(&mut self, width: f32, height: f32) {
         let _ = self.notifier.read();
+        // A `managed` controller routes reads and writes through the caller's callbacks, so the
+        // mirror the imperative movers peek is only ever right if it is refreshed from them.
+        self.scroll.set_if_modified(self.get_scroll.read().call(()));
+        if let Some((offset, size, direction)) = *self.pending.peek() {
+            if self.reveal_offset(offset, size, direction) {
+                self.pending.write().take();
+            }
+        }
         // Retain the content size so `is_scrollable` can compare it against the viewport. Guarded
         // so an unchanged layout doesn't notify overflow subscribers.
         self.inner.set_if_modified((width, height));
@@ -305,22 +323,6 @@ impl ScrollController {
         }
     }
 
-    /// Whether the scrollable has been laid out along `direction` yet.
-    ///
-    /// Subscribes, unlike the imperative movers, because this is the question a caller asks in order
-    /// to *retry*: [`scroll_to_offset`](Self::scroll_to_offset) and
-    /// [`scroll_to_item`](Self::scroll_to_item) can do nothing before the first layout, and a caller
-    /// that reveals a target on the frame it mounts needs waking when there is finally something to
-    /// reveal against. The viewport is refreshed with `set_if_modified`, so this settles after the
-    /// first layout instead of waking on every frame.
-    pub fn is_measured(&self, direction: Direction) -> bool {
-        let viewport = *self.viewport.read();
-        match direction {
-            Direction::Horizontal => viewport.width() > 0.0,
-            Direction::Vertical => viewport.height() > 0.0,
-        }
-    }
-
     /// Whether `direction` is scrolled to its end, within a pixel.
     ///
     /// The predicate a **stick-to-the-end** surface is built on, such as a chat transcript or a log tail:
@@ -408,34 +410,46 @@ impl ScrollController {
     ///
     /// A no-op once the span is already visible, so it is safe to call every render.
     ///
-    /// Returns whether the request could be **answered**, which is not the same as whether anything
-    /// moved: a span that is already visible answers `true` having done nothing. `false` means the
-    /// scrollable has not been laid out yet and the caller still owes its target a scroll, which a
-    /// caller that clears its request on the way past would otherwise drop on the first frame.
-    pub fn scroll_to_offset(&mut self, offset: f32, size: f32, direction: Direction) -> bool {
+    /// A request issued before the scrollable has been laid out is **kept and applied at the first
+    /// layout**, so a caller that reveals a target on the frame it mounts does not have to watch for
+    /// one. See [`pending`](Self::pending).
+    pub fn scroll_to_offset(&mut self, offset: f32, size: f32, direction: Direction) {
+        if !self.reveal_offset(offset, size, direction) {
+            self.pending.set(Some((offset, size, direction)));
+        }
+    }
+
+    /// [`scroll_to_offset`](Self::scroll_to_offset)'s body, answering whether the scrollable was
+    /// measured enough to act on.
+    fn reveal_offset(&mut self, offset: f32, size: f32, direction: Direction) -> bool {
         // Peek, never read, for `scroll_to_item`'s reason: this is imperative and is driven from
         // effects, which would otherwise subscribe to the very writes below.
         let viewport = *self.viewport.peek();
         let (x, y) = *self.scroll.peek();
+        let (inner_width, inner_height) = *self.inner.peek();
         // The content spans `0..inner` along the axis and the position is negative-going, so the
         // visible span of the content starts at `-position`.
-        let (position, shown) = match direction {
-            Direction::Horizontal => (x as f32, viewport.width()),
-            Direction::Vertical => (y as f32, viewport.height()),
+        let (position, shown, inner) = match direction {
+            Direction::Horizontal => (x as f32, viewport.width(), inner_width),
+            Direction::Vertical => (y as f32, viewport.height(), inner_height),
         };
         // Not laid out yet: nothing meaningful to reveal against.
         if shown <= 0.0 {
             return false;
         }
+        // The views clamp only what they paint with, so the stored position can sit outside the
+        // range the content actually has; revealing against it would answer for a viewport that is
+        // not on screen.
+        let position =
+            crate::scrollviews::shared::get_corrected_scroll_position(inner, shown, position);
         let delta = reveal_delta(offset, offset + size, -position, -position + shown);
-        if delta == 0.0 {
-            return true;
+        if delta != 0.0 {
+            let to = (position + delta).round() as i32;
+            self.on_scroll.write().call(match direction {
+                Direction::Horizontal => ScrollEvent::X(to),
+                Direction::Vertical => ScrollEvent::Y(to),
+            });
         }
-        let to = (position + delta).round() as i32;
-        self.on_scroll.write().call(match direction {
-            Direction::Horizontal => ScrollEvent::X(to),
-            Direction::Vertical => ScrollEvent::Y(to),
-        });
         true
     }
 }
