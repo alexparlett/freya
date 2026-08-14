@@ -142,6 +142,24 @@ impl MarkdownViewer {
         }
     }
 
+    /// Sets the theme of this viewer only, leaving the ambient `markdown_viewer` theme alone.
+    ///
+    /// For a surface that renders Markdown at a different scale from the rest of the app, such
+    /// as a small notes panel inside a dialog.
+    ///
+    /// ```rust
+    /// # use freya::prelude::*;
+    /// # use freya_markdown::{MarkdownViewer, MarkdownViewerThemePartial};
+    /// fn app() -> impl IntoElement {
+    ///     MarkdownViewer::new("# Hello World")
+    ///         .theme(MarkdownViewerThemePartial::new().paragraph_size(11.0))
+    /// }
+    /// ```
+    pub fn theme(mut self, theme: MarkdownViewerThemePartial) -> Self {
+        self.theme = Some(theme);
+        self
+    }
+
     /// Set a handler for custom inline elements.
     ///
     /// Each raw inline HTML tag in a paragraph (for example `<rust-logo/>`) is passed to the
