@@ -462,8 +462,8 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
         let mut pressing_shift = use_state(|| false);
         let mut clicking_scrollbar = use_state::<Option<(Axis, f64)>>(|| None);
         let mut size = use_state(SizedEventData::default);
-        // Unconditionally, so the scope's hook count does not depend on whether a controller was
-        // supplied: `scroll_controller` is an ordinary prop and a caller may vary it per render.
+        // Resolved unconditionally: `scroll_controller` is an ordinary prop a caller may vary per
+        // render, and a hook behind it would change this scope's hook count when it did.
         let own_controller = use_scroll_controller(ScrollConfig::default);
         let mut scroll_controller = self.scroll_controller.unwrap_or(own_controller);
         let mut dragging_content = use_state::<Option<CursorPoint>>(|| None);
@@ -489,12 +489,11 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
             ),
         };
 
-        scroll_controller.use_apply(inner_width, inner_height);
-        // Publish the viewport rectangle, as [`ScrollView`](crate::scrollviews::ScrollView) does, so
-        // `ScrollController::scroll_to_offset` can reveal a row this view has not built yet. `size.area`
-        // is the content box, fill-sized to the viewport (its own offset scrolls its children, not
-        // itself), so it is the fixed visible frame.
+        // Before `use_apply`, so a mover called later in this frame reveals against this layout
+        // rather than the last one. `size.area` is the content box, fill-sized to the viewport (its
+        // own offset scrolls its children, not itself), so it is the fixed visible frame.
         scroll_controller.set_viewport(size.read().area);
+        scroll_controller.use_apply(inner_width, inner_height);
 
         let corrected_scrolled_x =
             get_corrected_scroll_position(inner_width, size.read().area.width(), scrolled_x as f32);

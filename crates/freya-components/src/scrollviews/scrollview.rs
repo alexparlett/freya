@@ -238,8 +238,8 @@ impl Component for ScrollView {
         let mut pressing_shift = use_state(|| false);
         let mut clicking_scrollbar = use_state::<Option<(Axis, f64)>>(|| None);
         let mut size = use_state(SizedEventData::default);
-        // Unconditionally, so the scope's hook count does not depend on whether a controller was
-        // supplied, as in `VirtualScrollView`.
+        // Resolved unconditionally, as in `VirtualScrollView`: a hook behind an ordinary prop would
+        // change this scope's hook count when the prop changed.
         let own_controller = use_scroll_controller(ScrollConfig::default);
         let mut scroll_controller = self.scroll_controller.unwrap_or(own_controller);
         let mut dragging_content = use_state::<Option<CursorPoint>>(|| None);
