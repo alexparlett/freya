@@ -38,6 +38,8 @@ define_theme! {
         /// The vertical rule marking each level of indentation. Set it transparent for a tree
         /// that indents without guides.
         guide_fill: Color,
+        /// The ring a pressable item wears while it holds keyboard focus.
+        focus_border_fill: Color,
         /// Width of one level of indentation, and therefore the guide spacing.
         indent: f32,
         item_height: f32,
@@ -221,6 +223,8 @@ impl Component for TreeItem {
         let theme = get_theme!(&self.theme, TreeThemePreference, "tree");
         let config = use_try_consume::<TreeConfig>().unwrap_or_default();
         let mut hovering = use_state(|| false);
+        let a11y_id = use_a11y();
+        let focus = use_focus(a11y_id);
         let TreeTheme {
             color,
             arrow_fill,
@@ -229,6 +233,7 @@ impl Component for TreeItem {
             selected_item_background,
             selected_item_color,
             guide_fill,
+            focus_border_fill,
             item_padding,
             corner_radius,
             ..
@@ -272,14 +277,44 @@ impl Component for TreeItem {
                 })
                 // The arrow takes its own press and stops there: `Switch`'s press reaching its
                 // ancestors is what makes a "press the row to toggle" wrapper fire twice, so an
-                // arrow inside a pressable row has to consume its own.
+                // arrow inside a pressable row has to consume its own. Only the primary button,
+                // though: a row whose ancestor opens a context menu on the secondary press would
+                // otherwise have a dead patch exactly where its chevron is.
                 .map(on_toggle, |el, on_toggle| {
-                    el.on_pointer_down(move |e: Event<PointerEventData>| e.stop_propagation())
-                        .on_press(move |e| on_toggle.call(e))
+                    el.on_pointer_down(move |e: Event<PointerEventData>| {
+                        let secondary = matches!(
+                            e.data(),
+                            PointerEventData::Mouse(m) if m.button == Some(MouseButton::Right)
+                        );
+                        if !secondary {
+                            e.stop_propagation();
+                        }
+                    })
+                    .on_press(move |e| on_toggle.call(e))
                 })
             });
 
+        // An item with no `on_press` is a row that happens to live in a tree, not a link: a tab
+        // stop and a focus ring on it would promise an activation no key can perform. So role,
+        // focusability and the ring all follow whether the item is actually pressable, the same
+        // rule `SideBarItem` follows.
+        let pressable = self.on_press.is_some();
+        let focus_border = (pressable && focus() == Focus::Keyboard).then(|| {
+            Border::new()
+                .fill(focus_border_fill)
+                .width(2.)
+                .alignment(BorderAlignment::Inner)
+        });
+
         rect()
+            .a11y_id(a11y_id)
+            .a11y_focusable(pressable)
+            .a11y_role(if pressable {
+                AccessibilityRole::Link
+            } else {
+                AccessibilityRole::GenericContainer
+            })
+            .border(focus_border)
             .height(Size::px(config.item_height))
             // Hugs its own content by default, so a long row exceeds the viewport, which is what
             // the scroll view measures as overflow, and therefore what makes the horizontal pan

@@ -567,6 +567,7 @@ fn register_base_component_themes(theme: &mut Theme) {
             selected_item_background: Preference::reference("primary"),
             selected_item_color: Preference::reference("text_inverse"),
             guide_fill: Preference::reference("surface_primary"),
+            focus_border_fill: Preference::reference("secondary"),
             indent: Preference::Specific(16.),
             item_height: Preference::Specific(24.),
             item_padding: Preference::Specific(Gaps::new(0., 8., 0., 4.)),
