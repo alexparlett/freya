@@ -305,6 +305,22 @@ impl ScrollController {
         }
     }
 
+    /// Whether the scrollable has been laid out along `direction` yet.
+    ///
+    /// Subscribes, unlike the imperative movers, because this is the question a caller asks in order
+    /// to *retry*: [`scroll_to_offset`](Self::scroll_to_offset) and
+    /// [`scroll_to_item`](Self::scroll_to_item) can do nothing before the first layout, and a caller
+    /// that reveals a target on the frame it mounts needs waking when there is finally something to
+    /// reveal against. The viewport is refreshed with `set_if_modified`, so this settles after the
+    /// first layout instead of waking on every frame.
+    pub fn is_measured(&self, direction: Direction) -> bool {
+        let viewport = *self.viewport.read();
+        match direction {
+            Direction::Horizontal => viewport.width() > 0.0,
+            Direction::Vertical => viewport.height() > 0.0,
+        }
+    }
+
     /// Whether `direction` is scrolled to its end, within a pixel.
     ///
     /// The predicate a **stick-to-the-end** surface is built on, such as a chat transcript or a log tail:
@@ -391,7 +407,12 @@ impl ScrollController {
     /// controller's own, exactly as it is for `scroll_to_item`.
     ///
     /// A no-op once the span is already visible, so it is safe to call every render.
-    pub fn scroll_to_offset(&mut self, offset: f32, size: f32, direction: Direction) {
+    ///
+    /// Returns whether the request could be **answered**, which is not the same as whether anything
+    /// moved: a span that is already visible answers `true` having done nothing. `false` means the
+    /// scrollable has not been laid out yet and the caller still owes its target a scroll, which a
+    /// caller that clears its request on the way past would otherwise drop on the first frame.
+    pub fn scroll_to_offset(&mut self, offset: f32, size: f32, direction: Direction) -> bool {
         // Peek, never read, for `scroll_to_item`'s reason: this is imperative and is driven from
         // effects, which would otherwise subscribe to the very writes below.
         let viewport = *self.viewport.peek();
@@ -404,17 +425,18 @@ impl ScrollController {
         };
         // Not laid out yet: nothing meaningful to reveal against.
         if shown <= 0.0 {
-            return;
+            return false;
         }
         let delta = reveal_delta(offset, offset + size, -position, -position + shown);
         if delta == 0.0 {
-            return;
+            return true;
         }
         let to = (position + delta).round() as i32;
         self.on_scroll.write().call(match direction {
             Direction::Horizontal => ScrollEvent::X(to),
             Direction::Vertical => ScrollEvent::Y(to),
         });
+        true
     }
 }
 

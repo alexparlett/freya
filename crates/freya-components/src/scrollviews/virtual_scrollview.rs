@@ -462,9 +462,10 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
         let mut pressing_shift = use_state(|| false);
         let mut clicking_scrollbar = use_state::<Option<(Axis, f64)>>(|| None);
         let mut size = use_state(SizedEventData::default);
-        let mut scroll_controller = self
-            .scroll_controller
-            .unwrap_or_else(|| use_scroll_controller(ScrollConfig::default));
+        // Unconditionally, so the scope's hook count does not depend on whether a controller was
+        // supplied: `scroll_controller` is an ordinary prop and a caller may vary it per render.
+        let own_controller = use_scroll_controller(ScrollConfig::default);
+        let mut scroll_controller = self.scroll_controller.unwrap_or(own_controller);
         let mut dragging_content = use_state::<Option<CursorPoint>>(|| None);
         let mut drag_origin = use_state::<Option<CursorPoint>>(|| None);
         let (scrolled_x, scrolled_y) = scroll_controller.into();
