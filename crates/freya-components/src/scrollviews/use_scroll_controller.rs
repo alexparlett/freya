@@ -378,6 +378,44 @@ impl ScrollController {
                 .call(ScrollEvent::Y((y as f32 + dy).round() as i32));
         }
     }
+
+    /// [`scroll_to_item`](Self::scroll_to_item) for a target that has no measured rectangle: scrolls
+    /// the minimum amount needed to bring the span `[offset, offset + size]` of the content into view
+    /// along `direction`.
+    ///
+    /// This is the [`VirtualScrollView`](crate::scrollviews::VirtualScrollView) half of the pair. A
+    /// virtualized view only builds the items inside its viewport, so the row a caller wants to
+    /// reveal usually does not exist yet and can report no [`Area`] to reveal against. What the
+    /// caller does know is where the row sits in the content: for a fixed item size that is
+    /// `index * item_size`. Everything else, the viewport and the current position, is this
+    /// controller's own, exactly as it is for `scroll_to_item`.
+    ///
+    /// A no-op once the span is already visible, so it is safe to call every render.
+    pub fn scroll_to_offset(&mut self, offset: f32, size: f32, direction: Direction) {
+        // Peek, never read, for `scroll_to_item`'s reason: this is imperative and is driven from
+        // effects, which would otherwise subscribe to the very writes below.
+        let viewport = *self.viewport.peek();
+        let (x, y) = *self.scroll.peek();
+        // The content spans `0..inner` along the axis and the position is negative-going, so the
+        // visible span of the content starts at `-position`.
+        let (position, shown) = match direction {
+            Direction::Horizontal => (x as f32, viewport.width()),
+            Direction::Vertical => (y as f32, viewport.height()),
+        };
+        // Not laid out yet: nothing meaningful to reveal against.
+        if shown <= 0.0 {
+            return;
+        }
+        let delta = reveal_delta(offset, offset + size, -position, -position + shown);
+        if delta == 0.0 {
+            return;
+        }
+        let to = (position + delta).round() as i32;
+        self.on_scroll.write().call(match direction {
+            Direction::Horizontal => ScrollEvent::X(to),
+            Direction::Vertical => ScrollEvent::Y(to),
+        });
+    }
 }
 
 /// The signed distance to add to the scroll offset on one axis to reveal `[item_min, item_max]`

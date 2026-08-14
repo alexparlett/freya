@@ -11,6 +11,7 @@ use crate::{
     get_theme,
     icons::arrow::ArrowIcon,
     scrollviews::{
+        ScrollController,
         VirtualItem,
         VirtualScrollView,
     },
@@ -367,6 +368,7 @@ pub struct Tree<D, B: Fn(VirtualItem, &D) -> Element> {
     builder_data: D,
     length: usize,
     height: Size,
+    scroll_controller: Option<ScrollController>,
     key: DiffKey,
 }
 
@@ -378,6 +380,7 @@ impl<D: PartialEq, B: Fn(VirtualItem, &D) -> Element> PartialEq for Tree<D, B> {
             && self.builder_data == other.builder_data
             && self.length == other.length
             && self.height == other.height
+            && self.scroll_controller == other.scroll_controller
     }
 }
 
@@ -390,6 +393,7 @@ impl<B: Fn(VirtualItem, &()) -> Element> Tree<(), B> {
             builder_data: (),
             length: 0,
             height: Size::fill(),
+            scroll_controller: None,
             key: DiffKey::None,
         }
     }
@@ -405,6 +409,7 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> Tree<D, B> {
             builder_data,
             length: 0,
             height: Size::fill(),
+            scroll_controller: None,
             key: DiffKey::None,
         }
     }
@@ -417,6 +422,19 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> Tree<D, B> {
 
     pub fn height(mut self, height: impl Into<Size>) -> Self {
         self.height = height.into();
+        self
+    }
+
+    /// Attaches a [`ScrollController`] to drive the tree externally.
+    ///
+    /// The reason a tree wants one is revealing a row: the caller knows which row it means by index,
+    /// and [`ScrollController::scroll_to_offset`] turns that index into a scroll without the row
+    /// having to exist yet, which for a virtualized tree is the usual case.
+    pub fn scroll_controller(
+        mut self,
+        scroll_controller: impl Into<Option<ScrollController>>,
+    ) -> Self {
+        self.scroll_controller = scroll_controller.into();
         self
     }
 
@@ -459,6 +477,7 @@ impl<D: Clone + PartialEq + 'static, B: Clone + Fn(VirtualItem, &D) -> Element +
             .corner_radius(corner_radius)
             .child(
                 VirtualScrollView::new_with_data(self.builder_data.clone(), builder)
+                    .scroll_controller(self.scroll_controller)
                     .length(self.length)
                     .item_size(item_height)
                     // A tree scrolls on both axes — down its rows and across a long value — so a

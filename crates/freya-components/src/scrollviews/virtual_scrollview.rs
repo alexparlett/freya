@@ -489,6 +489,11 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
         };
 
         scroll_controller.use_apply(inner_width, inner_height);
+        // Publish the viewport rectangle, as [`ScrollView`](crate::scrollviews::ScrollView) does, so
+        // `ScrollController::scroll_to_offset` can reveal a row this view has not built yet. `size.area`
+        // is the content box, fill-sized to the viewport (its own offset scrolls its children, not
+        // itself), so it is the fixed visible frame.
+        scroll_controller.set_viewport(size.read().area);
 
         let corrected_scrolled_x =
             get_corrected_scroll_position(inner_width, size.read().area.width(), scrolled_x as f32);
