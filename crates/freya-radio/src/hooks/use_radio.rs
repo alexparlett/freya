@@ -818,6 +818,7 @@ where
 ///     }
 /// }
 /// ```
+#[track_caller]
 pub fn use_radio<Value, Channel>(channel: Channel) -> Radio<Value, Channel>
 where
     Channel: RadioChannel<Value>,
@@ -864,6 +865,7 @@ where
     use_provide_context(|| RadioStation::create(init_value()))
 }
 
+#[track_caller]
 pub fn use_radio_station<Value, Channel>() -> RadioStation<Value, Channel>
 where
     Channel: RadioChannel<Value>,

@@ -601,11 +601,12 @@ fn register_base_component_themes(theme: &mut Theme) {
         MenuItemThemePreference {
             background: Preference::Specific(Color::TRANSPARENT),
             hover_background: Preference::reference("surface_secondary"),
-            select_background: Preference::reference("surface_secondary"),
+            select_background: Preference::reference("surface_primary"),
             border_fill: Preference::Specific(Color::TRANSPARENT),
-            select_border_fill: Preference::reference("border_focus"),
-            corner_radius: Preference::Specific(CornerRadius::new_all(6.)),
+            focus_border_fill: Preference::reference("border_focus"),
+            corner_radius: Preference::Specific(CornerRadius::new_all(10.)),
             color: Preference::reference("text_primary"),
+            select_color: Preference::reference("text_primary"),
         },
     );
     theme.set(

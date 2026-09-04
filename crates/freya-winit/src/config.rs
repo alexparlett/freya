@@ -31,8 +31,30 @@ use crate::{
 };
 
 pub type WindowBuilderHook =
-    Box<dyn FnOnce(WindowAttributes, &ActiveEventLoop) -> WindowAttributes + Send + Sync>;
-pub type WindowHandleHook = Box<dyn FnOnce(&mut Window) + Send + Sync>;
+    Box<dyn FnOnce(WindowAttributes, &ActiveEventLoop) -> WindowAttributes>;
+pub type WindowHandleHook = Box<dyn FnOnce(&mut Window)>;
+
+/// Graphics driver preference a window asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RendererPreference {
+    #[default]
+    Auto,
+    Software,
+    OpenGl,
+    Vulkan,
+}
+
+impl RendererPreference {
+    pub(crate) fn as_name(self) -> Option<&'static str> {
+        match self {
+            Self::Auto => None,
+            Self::Software => Some("software"),
+            Self::OpenGl => Some("opengl"),
+            Self::Vulkan => Some("vulkan"),
+        }
+    }
+}
+
 /// Decision returned by the `on_close` hook to determine whether a window should close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CloseDecision {
@@ -45,8 +67,7 @@ pub enum CloseDecision {
 
 /// Hook called when a window close is requested.
 /// Returns a [`CloseDecision`] to determine whether the window should actually close.
-pub type OnCloseHook =
-    Box<dyn FnMut(crate::renderer::RendererContext, WindowId) -> CloseDecision + Send>;
+pub type OnCloseHook = Box<dyn FnMut(crate::renderer::RendererContext, WindowId) -> CloseDecision>;
 
 /// Configuration for a Window.
 pub struct WindowConfig {
@@ -77,6 +98,8 @@ pub struct WindowConfig {
     /// macOS only: offset for the traffic-light window buttons, in logical points.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub(crate) traffic_light_inset: Option<(f64, f64)>,
+    /// Preferred graphics backend for the Window.
+    pub(crate) renderer: RendererPreference,
     /// Hook function called with the Window Attributes.
     pub(crate) window_attributes_hook: Option<WindowBuilderHook>,
     /// Hook function called with the Window.
@@ -100,6 +123,7 @@ impl Debug for WindowConfig {
             .field("icon", &self.icon)
             .field("app_id", &self.app_id)
             .field("traffic_light_inset", &self.traffic_light_inset)
+            .field("renderer", &self.renderer)
             .finish()
     }
 }
@@ -130,6 +154,7 @@ impl WindowConfig {
             icon: None,
             app_id: None,
             traffic_light_inset: None,
+            renderer: RendererPreference::default(),
             window_attributes_hook: None,
             window_handle_hook: None,
             on_close: None,
@@ -229,13 +254,17 @@ impl WindowConfig {
         self
     }
 
+    /// Prefer a graphics backend for this Window, overriding `FREYA_RENDERER`.
+    pub fn with_renderer(mut self, renderer: RendererPreference) -> Self {
+        self.renderer = renderer;
+        self
+    }
+
     /// Register a Window Attributes hook.
     pub fn with_window_attributes(
         mut self,
         window_attributes_hook: impl FnOnce(WindowAttributes, &ActiveEventLoop) -> WindowAttributes
-        + 'static
-        + Send
-        + Sync,
+        + 'static,
     ) -> Self {
         self.window_attributes_hook = Some(Box::new(window_attributes_hook));
         self
@@ -244,7 +273,7 @@ impl WindowConfig {
     /// Register a Window handle hook.
     pub fn with_window_handle(
         mut self,
-        window_handle_hook: impl FnOnce(&mut Window) + 'static + Send + Sync,
+        window_handle_hook: impl FnOnce(&mut Window) + 'static,
     ) -> Self {
         self.window_handle_hook = Some(Box::new(window_handle_hook));
         self
@@ -253,9 +282,7 @@ impl WindowConfig {
     /// Register an on-close hook that is called when the window is requested to close by the user.
     pub fn with_on_close(
         mut self,
-        on_close: impl FnMut(crate::renderer::RendererContext, WindowId) -> CloseDecision
-        + 'static
-        + Send,
+        on_close: impl FnMut(crate::renderer::RendererContext, WindowId) -> CloseDecision + 'static,
     ) -> Self {
         self.on_close = Some(Box::new(on_close));
         self
@@ -286,6 +313,8 @@ pub type MenuHandler = Box<dyn FnMut(muda::MenuEvent, crate::renderer::RendererC
 pub type TaskHandler =
     Box<dyn FnOnce(crate::renderer::LaunchProxy) -> Pin<Box<dyn Future<Output = ()>>> + 'static>;
 
+pub type GlobalContextInserter = Box<dyn FnOnce(&GlobalContexts)>;
+
 /// Configuration for the initial state of the application.
 ///
 /// Use this to register windows, plugins, fonts, and other settings
@@ -300,6 +329,7 @@ pub struct LaunchConfig {
     pub(crate) embedded_fonts: EmbeddedFonts,
     pub(crate) fallback_fonts: Vec<Cow<'static, str>>,
     pub(crate) tasks: Vec<TaskHandler>,
+    pub(crate) globals: Vec<GlobalContextInserter>,
     pub(crate) exit_on_close: bool,
     pub(crate) event_loop: Option<winit::event_loop::EventLoop<crate::renderer::NativeEvent>>,
     pub(crate) gpu_resource_cache_limit: usize,
@@ -317,6 +347,7 @@ impl Default for LaunchConfig {
             embedded_fonts: Default::default(),
             fallback_fonts: default_fonts(),
             tasks: Vec::new(),
+            globals: Vec::new(),
             exit_on_close: true,
             event_loop: None,
             gpu_resource_cache_limit: 1024 * 1024 * 1024,
@@ -429,6 +460,34 @@ impl LaunchConfig {
     /// Register a default font. Will be used if found.
     pub fn with_default_font(mut self, font_name: impl Into<Cow<'static, str>>) -> Self {
         self.fallback_fonts.insert(0, font_name.into());
+        self
+    }
+
+    /// Register a value in the [`GlobalContexts`], shared by all the windows.
+    ///
+    /// ```rust,no_run
+    /// # use freya::prelude::*;
+    /// #[derive(Clone)]
+    /// struct AppName(String);
+    ///
+    /// fn main() {
+    ///     launch(
+    ///         LaunchConfig::new()
+    ///             .with_global(AppName("Freya".to_string()))
+    ///             .with_window(WindowConfig::new(app)),
+    ///     )
+    /// }
+    ///
+    /// fn app() -> impl IntoElement {
+    ///     let app_name = GlobalContexts::get().get_context::<AppName>();
+    ///
+    ///     label().text(app_name.0)
+    /// }
+    /// ```
+    pub fn with_global<T: Clone + 'static>(mut self, value: T) -> Self {
+        self.globals.push(Box::new(move |global_contexts| {
+            global_contexts.insert_context(value);
+        }));
         self
     }
 

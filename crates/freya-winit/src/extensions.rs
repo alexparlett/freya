@@ -8,6 +8,7 @@ use freya_core::{
         PointerEventData,
         PressEventType,
         UserEvent,
+        consume_root_context,
     },
     user_event::SingleThreadErasedEvent,
 };
@@ -22,10 +23,24 @@ use crate::{
         NativeWindowErasedEventAction,
         RendererContext,
     },
+    window::CurrentWindowId,
 };
 
 /// Extension trait that adds winit-specific window management capabilities to [`Platform`].
 pub trait WinitPlatformExt {
+    /// Get the [`WindowId`] of the current app.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use freya::prelude::*;
+    ///
+    /// fn close_current_window() {
+    ///     Platform::get().close_window(Platform::window_id());
+    /// }
+    /// ```
+    fn window_id() -> WindowId;
+
     /// Dynamically launch a new window at runtime with the given configuration.
     ///
     /// This is meant to create windows on the fly after the application has started,
@@ -72,8 +87,6 @@ pub trait WinitPlatformExt {
     fn close_current_window(&self);
 
     /// Focus a window by its [`WindowId`].
-    ///
-    /// If `window_id` is `None`, the current window will be focused.
     ///
     /// # Example
     ///
@@ -209,6 +222,10 @@ impl WindowDragExt for Rect {
 }
 
 impl WinitPlatformExt for Platform {
+    fn window_id() -> WindowId {
+        consume_root_context::<CurrentWindowId>().0
+    }
+
     async fn launch_window(&self, window_config: WindowConfig) -> WindowId {
         let (tx, rx) = futures_channel::oneshot::channel();
         self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
@@ -250,8 +267,9 @@ impl WinitPlatformExt for Platform {
         let title = title.into();
         self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
             NativeWindowErasedEventAction::RendererCallback(Box::new(move |id, context| {
-                let app = context.windows.get_mut(&window_id.unwrap_or(id)).unwrap();
-                app.set_title(&title);
+                if let Some(app) = context.windows.get_mut(&window_id.unwrap_or(id)) {
+                    app.set_title(&title);
+                }
             })),
         ))));
     }
@@ -262,8 +280,10 @@ impl WinitPlatformExt for Platform {
         callback: impl FnOnce(&mut Window) + 'static,
     ) {
         self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
-            NativeWindowErasedEventAction::RendererCallback(Box::new(move |id, c| {
-                callback(&mut c.windows.get_mut(&window_id.unwrap_or(id)).unwrap().window);
+            NativeWindowErasedEventAction::RendererCallback(Box::new(move |id, context| {
+                if let Some(app) = context.windows.get_mut(&window_id.unwrap_or(id)) {
+                    callback(&mut app.window);
+                }
             })),
         ))));
     }

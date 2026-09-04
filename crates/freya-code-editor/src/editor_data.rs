@@ -179,7 +179,12 @@ impl CodeEditorData {
             EditableEvent::Release => {
                 self.dragging.clicked = false;
             }
-            EditableEvent::KeyDown { key, modifiers } => {
+            EditableEvent::KeyDown {
+                key,
+                modifiers,
+                editor_line,
+                holder,
+            } => {
                 match key {
                     // Handle dragging
                     Key::Named(NamedKey::Shift) => {
@@ -187,7 +192,16 @@ impl CodeEditorData {
                     }
                     // Handle editing
                     _ => {
-                        let event = self.process_key(key, &modifiers, true, true, true, true);
+                        let event = self.process_key(
+                            key,
+                            &modifiers,
+                            editor_line,
+                            holder,
+                            true,
+                            true,
+                            true,
+                            true,
+                        );
                         if event.contains(TextEvent::TEXT_CHANGED) {
                             self.parse();
                             self.measure(font_size, font_family);
@@ -223,6 +237,10 @@ impl TextEditor for CodeEditorData {
 
     fn lines(&self) -> Self::LinesIterator<'_> {
         unimplemented!("Unused.")
+    }
+
+    fn text(&self) -> Cow<'_, str> {
+        self.rope.slice(..).into()
     }
 
     fn insert_char(&mut self, ch: char, idx: usize) -> usize {
@@ -451,7 +469,11 @@ impl TextEditor for CodeEditorData {
         self.history.redo(&mut self.rope)
     }
 
-    fn editor_history(&mut self) -> &mut EditorHistory {
+    fn editor_history(&self) -> &EditorHistory {
+        &self.history
+    }
+
+    fn editor_history_mut(&mut self) -> &mut EditorHistory {
         &mut self.history
     }
 
