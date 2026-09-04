@@ -762,7 +762,7 @@ pub fn flex_does_not_measure_negative_when_siblings_overflow() {
         0,
         Rect::new(Point2D::new(0.0, 0.0), Size2D::new(1000.0, 1000.0)),
         &mut measurer,
-        &mut mocked_tree,
+        &mocked_tree,
     );
 
     // The fixed children keep their sizes and overflow, which is what `Overflow` is for.
