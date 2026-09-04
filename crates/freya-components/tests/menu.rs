@@ -264,8 +264,24 @@ pub fn menu_nested_submenus() {
     assert!(!label_texts.contains(&"Option 2".to_string()));
     assert!(!label_texts.contains(&"Option 3".to_string()));
 
-    // Hover over "More Options" to reveal nested submenu
-    test.move_cursor((150.0, 45.0));
+    // Hover over "More Options" to reveal nested submenu.
+    //
+    // Its centre is looked up rather than written down: a row's top edge can land exactly on a
+    // stated coordinate, and which side of that edge the point falls on then comes down to the
+    // platform's font metrics, so the same number hits on one target and misses on another.
+    let more_options = labels
+        .iter()
+        .find(|label| {
+            Label::try_downcast(&*label.element())
+                .is_some_and(|label| label.text.as_ref() == "More Options")
+        })
+        .expect("\"More Options\" should be visible before its submenu can be opened")
+        .layout()
+        .area;
+    test.move_cursor((
+        more_options.center().x as f64,
+        more_options.center().y as f64,
+    ));
     test.sync_and_update();
 
     let labels = test.find_many(|node, element| Label::try_downcast(element).map(|_| node));

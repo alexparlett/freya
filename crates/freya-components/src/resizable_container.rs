@@ -831,12 +831,6 @@ impl Component for ResizableHandle {
         let direction = registry.read().direction;
         let handle_px = registry.read().handle_size;
 
-        use_drop(move || {
-            if *status.peek() == HandleStatus::Hovering {
-                Cursor::set(CursorIcon::default());
-            }
-        });
-
         let cursor = match direction {
             Direction::Horizontal => CursorIcon::ColResize,
             _ => CursorIcon::RowResize,
@@ -844,14 +838,10 @@ impl Component for ResizableHandle {
 
         let on_pointer_leave = move |_| {
             *status.write() = HandleStatus::Idle;
-            if !clicking() {
-                Cursor::set(CursorIcon::default());
-            }
         };
 
         let on_pointer_enter = move |_| {
             *status.write() = HandleStatus::Hovering;
-            Cursor::set(cursor);
         };
 
         let on_capture_global_pointer_move = {
@@ -916,12 +906,7 @@ impl Component for ResizableHandle {
         let on_global_pointer_press = {
             let mut registry = registry;
             move |_: Event<PointerEventData>| {
-                if *clicking.read() {
-                    if *status.peek() != HandleStatus::Hovering {
-                        Cursor::set(CursorIcon::default());
-                    }
-                    clicking.set(false);
-                }
+                clicking.set_if_modified(false);
                 // Cleared outside the `clicking` guard, on any global press: a gesture that ends
                 // without this handle seeing its own pointer-up — the window losing focus
                 // mid-drag, say — would otherwise leave the flag set for good, and every later
@@ -952,6 +937,7 @@ impl Component for ResizableHandle {
             .height(height)
             .background(background)
             .corner_radius(corner_radius)
+            .cursor(cursor)
             .on_sized(move |e: Event<SizedEventData>| {
                 size.set(e.area);
                 allow_resizing.set(true);

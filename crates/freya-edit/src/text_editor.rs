@@ -6,7 +6,14 @@ use std::{
 };
 
 use freya_clipboard::clipboard::Clipboard;
-use freya_core::prelude::PressEventType;
+use freya_core::{
+    elements::paragraph::{
+        ParagraphCursorExt,
+        ParagraphHolder,
+        ParagraphHolderInner,
+    },
+    prelude::PressEventType,
+};
 use keyboard_types::{
     Key,
     Modifiers,
@@ -217,6 +224,8 @@ pub trait TextEditor {
     /// Get a line from the text
     fn line(&self, line_idx: usize) -> Option<Line<'_>>;
 
+    fn text(&self) -> Cow<'_, str>;
+
     /// Total of lines
     fn len_lines(&self) -> usize;
 
@@ -292,7 +301,20 @@ pub trait TextEditor {
     }
 
     /// Move the cursor 1 line down
-    fn cursor_down(&mut self) -> bool {
+    fn cursor_down(
+        &mut self,
+        editor_line: Option<EditorLine>,
+        holder: Option<&ParagraphHolder>,
+    ) -> bool {
+        if let Some(editor_line) = editor_line
+            && let Some(holder) = holder
+            && let Some(position) = self.visual_line_position(holder, editor_line, 1)
+        {
+            self.selection_mut().move_to(position);
+
+            return true;
+        }
+
         let old_row = self.cursor_row();
         let old_col = self.cursor_col();
 
@@ -313,7 +335,20 @@ pub trait TextEditor {
     }
 
     /// Move the cursor 1 line up
-    fn cursor_up(&mut self) -> bool {
+    fn cursor_up(
+        &mut self,
+        editor_line: Option<EditorLine>,
+        holder: Option<&ParagraphHolder>,
+    ) -> bool {
+        if let Some(editor_line) = editor_line
+            && let Some(holder) = holder
+            && let Some(position) = self.visual_line_position(holder, editor_line, -1)
+        {
+            self.selection_mut().move_to(position);
+
+            return true;
+        }
+
         let pos = self.cursor_pos();
         let old_row = self.cursor_row();
         let old_col = self.cursor_col();
@@ -329,6 +364,31 @@ pub trait TextEditor {
         } else {
             false
         }
+    }
+
+    /// Cursor position one visual line up or down.
+    fn visual_line_position(
+        &self,
+        holder: &ParagraphHolder,
+        editor_line: EditorLine,
+        line_offset: isize,
+    ) -> Option<usize> {
+        let holder = holder.0.borrow();
+        let ParagraphHolderInner { paragraph, .. } = holder.as_ref()?;
+
+        if !matches!(editor_line, EditorLine::SingleParagraph) {
+            return None;
+        }
+
+        let cursor_rect = paragraph.measured_cursor_rect(&self.text(), self.cursor_pos())?;
+
+        let lines = paragraph.get_line_metrics();
+        let current = lines
+            .iter()
+            .position(|line| (cursor_rect.top as f64) < line.baseline + line.descent)?;
+        let line = lines.get(current.checked_add_signed(line_offset)?)?;
+
+        Some(paragraph.cursor_index_at_point((cursor_rect.left as f64, line.baseline)))
     }
 
     /// Move the cursor 1 grapheme cluster to the right
@@ -589,6 +649,8 @@ pub trait TextEditor {
         down: bool,
         granularity: Option<CaretGranularity>,
         extend: bool,
+        editor_line: Option<EditorLine>,
+        holder: Option<&ParagraphHolder>,
     ) -> bool {
         let before = self.cursor_pos();
         let range = self.get_selection_range();
@@ -611,10 +673,10 @@ pub trait TextEditor {
                 self.selection_mut().move_to(to);
             }
             None if down => {
-                self.cursor_down();
+                self.cursor_down(editor_line, holder);
             }
             None => {
-                self.cursor_up();
+                self.cursor_up(editor_line, holder);
             }
         }
         self.cursor_pos() != before
@@ -750,10 +812,13 @@ pub trait TextEditor {
     }
 
     // Process a Keyboard event
+    #[allow(clippy::too_many_arguments)]
     fn process_key(
         &mut self,
         key: &Key,
         modifiers: &Modifiers,
+        editor_line: Option<EditorLine>,
+        holder: Option<&ParagraphHolder>,
         allow_tabs: bool,
         allow_changes: bool,
         allow_read_clipboard: bool,
@@ -855,6 +920,8 @@ pub trait TextEditor {
                     down,
                     CaretGranularity::vertical(modifiers),
                     modifiers.contains(Modifiers::SHIFT),
+                    editor_line,
+                    holder,
                 ) {
                     event.insert(TextEvent::CURSOR_CHANGED);
                 }
@@ -985,7 +1052,9 @@ pub trait TextEditor {
 
     fn redo(&mut self) -> Option<TextSelection>;
 
-    fn editor_history(&mut self) -> &mut EditorHistory;
+    fn editor_history(&self) -> &EditorHistory;
+
+    fn editor_history_mut(&mut self) -> &mut EditorHistory;
 
     fn get_selection_range(&self) -> Option<(usize, usize)>;
 

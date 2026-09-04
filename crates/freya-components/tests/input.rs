@@ -250,6 +250,68 @@ pub fn input_submit_test() {
 }
 
 #[test]
+pub fn input_multiline_test() {
+    fn multiline_app() -> impl IntoElement {
+        let value = use_state(String::new);
+        let mut submitted = use_state(|| false);
+
+        rect()
+            .child(
+                Input::new(value)
+                    .multiline(true)
+                    .on_submit(move |_| submitted.set(true)),
+            )
+            .child(format!(
+                "value={:?} submitted={}",
+                value.read(),
+                submitted.read()
+            ))
+    }
+
+    let mut test = launch_test(multiline_app);
+
+    // Focus and type two lines. With an `on_submit` in place plain Enter submits, so the line
+    // break is `Shift`+`Enter`. See [`Input::multiline`].
+    test.click_cursor((15.0, 15.0));
+    test.write_text("hello");
+    test.press_key_with_modifiers(Key::Named(NamedKey::Enter), Modifiers::SHIFT);
+    test.write_text("world");
+
+    // Shift+Enter inserted a line break instead of submitting
+    let label = test.find(|_, element| {
+        Label::try_downcast(element)
+            .filter(|label| label.text.as_ref() == "value=\"hello\\nworld\" submitted=false")
+    });
+    assert!(label.is_some());
+}
+
+#[test]
+pub fn input_multiline_scrollbar_press_test() {
+    fn scrollbar_app() -> impl IntoElement {
+        let value = use_state(|| "One\nTwo\nThree\nFour\nFive\nSix\nSeven".to_string());
+
+        rect().child(
+            Input::new(value)
+                .multiline(true)
+                .width(Size::px(300.))
+                .height(Size::px(120.)),
+        )
+    }
+
+    let mut test = launch_test(scrollbar_app);
+    test.sync_and_update();
+
+    test.click_cursor((100.0, 40.0));
+    test.press_cursor((292.0, 30.0));
+    test.move_cursor((100.0, 90.0));
+    test.sync_and_update();
+
+    let highlights =
+        test.find(|_, element| Some(Paragraph::try_downcast(element)?.highlights.clone()));
+    assert_eq!(highlights, Some(vec![]));
+}
+
+#[test]
 pub fn input_disabled_test() {
     fn disabled_app() -> impl IntoElement {
         let value = use_state(String::new);
@@ -319,6 +381,40 @@ pub fn input_shift_wheel_scroll_test() {
     // Focus and fill with text wider than the input
     test.click_cursor((15.0, 15.0));
     test.write_text("this is a very long text that overflows the input width");
+    test.sync_and_update();
+    test.sync_and_update();
+
+    let paragraph_x = |test: &TestingRunner| {
+        test.find(|node, element| {
+            Paragraph::try_downcast(element).map(|_| node.layout().area.min_x())
+        })
+        .unwrap()
+    };
+
+    // Move the cursor back to the start so the input is scrolled to the beginning
+    test.press_key(Key::Named(NamedKey::Home));
+    test.sync_and_update();
+    let initial_x = paragraph_x(&test);
+
+    // Hold Shift and wheel over the input to scroll it horizontally while focused
+    test.press_key_with_modifiers(Key::Named(NamedKey::Shift), Modifiers::SHIFT);
+    test.scroll((75.0, 15.0), (0.0, -50.0));
+
+    let scrolled_x = paragraph_x(&test);
+    assert!(scrolled_x < initial_x);
+}
+
+#[test]
+pub fn input_drag_scrolls_to_cursor_test() {
+    fn drag_app() -> impl IntoElement {
+        let value =
+            use_state(|| "this is a very long text that overflows the input width".to_string());
+
+        rect().child(Input::new(value).width(Size::px(150.)))
+    }
+
+    let mut test = launch_test(drag_app);
+    test.sync_and_update();
 
     let paragraph_x = |test: &TestingRunner| {
         test.find(|node, element| {
@@ -328,12 +424,22 @@ pub fn input_shift_wheel_scroll_test() {
     };
     let initial_x = paragraph_x(&test);
 
-    // Hold Shift and wheel over the input to scroll it horizontally while focused
-    test.press_key_with_modifiers(Key::Named(NamedKey::Shift), Modifiers::SHIFT);
-    test.scroll((75.0, 15.0), (0.0, -50.0));
+    // Start dragging inside the input and move past its right edge
+    test.press_cursor((100.0, 15.0));
+    test.sync_and_update();
+    test.move_cursor((400.0, 15.0));
+    test.sync_and_update();
 
-    let scrolled_x = paragraph_x(&test);
-    assert!(scrolled_x < initial_x);
+    let dragged_x = paragraph_x(&test);
+    assert!(dragged_x < initial_x);
+
+    // Dragging back past the left edge scrolls back to the beginning
+    test.move_cursor((-500.0, 15.0));
+    test.sync_and_update();
+
+    assert_eq!(paragraph_x(&test), initial_x);
+
+    test.release_cursor((-500.0, 15.0));
 }
 
 #[test]
@@ -410,4 +516,49 @@ pub fn input_without_select_all_on_init_keeps_the_cursor_at_the_start() {
         Label::try_downcast(element).filter(|label| label.text.as_ref() == "value=newold name")
     });
     assert!(label.is_some());
+}
+
+#[test]
+pub fn input_long_typing_follows_cursor_test() {
+    fn typing_app() -> impl IntoElement {
+        let value = use_state(String::new);
+
+        rect().child(Input::new(value).width(Size::px(150.)))
+    }
+
+    let mut test = launch_test(typing_app);
+
+    let paragraph_metrics = |test: &TestingRunner| {
+        test.find(|node, element| {
+            Paragraph::try_downcast(element)
+                .map(|_| (node.layout().area.min_x(), node.layout().area.width()))
+        })
+        .unwrap()
+    };
+
+    test.click_cursor((15.0, 15.0));
+    let (initial_x, _) = paragraph_metrics(&test);
+
+    // Keep typing way beyond the input width, the scroll must follow the cursor every time
+    for _ in 0..20 {
+        test.write_text("some more text ");
+        test.sync_and_update();
+        test.sync_and_update();
+
+        let (min_x, width) = paragraph_metrics(&test);
+        if width > 150.0 {
+            let right_edge = min_x + width;
+            assert!(
+                (right_edge - 150.0).abs() < 2.0,
+                "text end should stay at the right edge, min_x={min_x} width={width}"
+            );
+        }
+    }
+
+    // Moving the cursor back to the start scrolls the input back to the beginning
+    test.press_key(Key::Named(NamedKey::Home));
+    test.sync_and_update();
+
+    let (home_x, _) = paragraph_metrics(&test);
+    assert_eq!(home_x, initial_x);
 }

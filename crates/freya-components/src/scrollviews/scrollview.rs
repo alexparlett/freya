@@ -17,6 +17,7 @@ use torin::{
 
 use crate::scrollviews::{
     ScrollBar,
+    ScrollBarThemePartial,
     ScrollConfig,
     ScrollController,
     ScrollThumb,
@@ -83,6 +84,8 @@ pub struct ScrollView {
     wheel_axis_lock: Option<f32>,
     contain_wheel: bool,
     latch_wheel: bool,
+    on_sized: Option<EventHandler<Event<SizedEventData>>>,
+    scrollbar_theme: Option<ScrollBarThemePartial>,
     key: DiffKey,
 }
 
@@ -116,6 +119,8 @@ impl Default for ScrollView {
             wheel_axis_lock: None,
             contain_wheel: false,
             latch_wheel: false,
+            on_sized: None,
+            scrollbar_theme: None,
             key: DiffKey::None,
         }
     }
@@ -206,6 +211,18 @@ impl ScrollView {
     /// chaining and [`contain_wheel`](Self::contain_wheel)'s hard hover trap.
     pub fn latch_wheel(mut self) -> Self {
         self.latch_wheel = true;
+        self
+    }
+
+    /// Sets the theme used by the scrollbar.
+    pub fn scrollbar_theme(mut self, scrollbar_theme: ScrollBarThemePartial) -> Self {
+        self.scrollbar_theme = Some(scrollbar_theme);
+        self
+    }
+
+    /// Sets a handler called with the scroll view's area whenever it is laid out.
+    pub fn on_sized(mut self, on_sized: impl Into<EventHandler<Event<SizedEventData>>>) -> Self {
+        self.on_sized = Some(on_sized.into());
         self
     }
 
@@ -572,6 +589,7 @@ impl Component for ScrollView {
                 node.set_scroll_y(corrected_scrolled_y as f64)
             })
             .scrollable(true)
+            .map(self.on_sized.clone(), |el, on_sized| el.on_sized(on_sized))
             .on_wheel(on_wheel)
             .on_capture_global_pointer_press(on_capture_global_pointer_press)
             .on_mouse_move(on_mouse_move)
@@ -603,13 +621,13 @@ impl Component for ScrollView {
                     )
                     .maybe_child(vertical_scrollbar_is_visible.then_some({
                         rect().child(ScrollBar {
-                            theme: None,
+                            theme: self.scrollbar_theme.clone(),
                             clicking_scrollbar,
                             axis: Axis::Y,
                             offset: scrollbar_y,
                             size: Size::px(size.read().area.height()),
                             thumb: ScrollThumb {
-                                theme: None,
+                                theme: self.scrollbar_theme.clone(),
                                 clicking_scrollbar,
                                 axis: Axis::Y,
                                 size: scrollbar_height,
@@ -619,13 +637,13 @@ impl Component for ScrollView {
             )
             .maybe_child(horizontal_scrollbar_is_visible.then_some({
                 rect().child(ScrollBar {
-                    theme: None,
+                    theme: self.scrollbar_theme.clone(),
                     clicking_scrollbar,
                     axis: Axis::X,
                     offset: scrollbar_x,
                     size: Size::px(size.read().area.width()),
                     thumb: ScrollThumb {
-                        theme: None,
+                        theme: self.scrollbar_theme.clone(),
                         clicking_scrollbar,
                         axis: Axis::X,
                         size: scrollbar_width,
