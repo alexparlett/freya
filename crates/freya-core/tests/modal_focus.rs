@@ -1,6 +1,7 @@
+use std::time::Duration;
+
 use freya_core::prelude::*;
 use freya_testing::prelude::*;
-use std::time::Duration;
 
 type Handles = (State<bool>, State<Vec<&'static str>>);
 
