@@ -183,6 +183,14 @@ impl AccessibilityTree {
             self.focus_node_with_strategy(requested_focus, tree);
         }
 
+        if let Some(modal) = Self::active_modal(tree)
+            && self
+                .focused_node_id()
+                .is_none_or(|id| !Self::inside_modal(tree, id, Some(modal)))
+        {
+            self.focused_id = tree.accessibility_state[&modal].a11y_id;
+        }
+
         if let Some(node_id) = self.focused_node_id()
             && has_request_focus
         {
@@ -197,14 +205,47 @@ impl AccessibilityTree {
         }
     }
 
+    fn active_modal(tree: &Tree) -> Option<NodeId> {
+        let mut modal = None;
+        tree.traverse_depth(|id| {
+            if tree.elements[&id].accessibility().builder.is_modal() {
+                modal = Some(id);
+            }
+        });
+        modal
+    }
+
+    fn inside_modal(tree: &Tree, mut id: NodeId, modal: Option<NodeId>) -> bool {
+        let Some(modal) = modal else {
+            return true;
+        };
+        loop {
+            if id == modal {
+                return true;
+            }
+            let Some(parent) = tree.parents.get(&id) else {
+                return false;
+            };
+            if *parent == id {
+                return false;
+            }
+            id = *parent;
+        }
+    }
+
     /// Focus a Node given the strategy.
     pub fn focus_node_with_strategy(
         &mut self,
         strategy: AccessibilityFocusStrategy,
         tree: &mut Tree,
     ) {
+        let modal = Self::active_modal(tree);
         if let AccessibilityFocusStrategy::Node(id) = strategy {
-            if self.map.contains_key(&id) {
+            if self
+                .map
+                .get(&id)
+                .is_some_and(|node| Self::inside_modal(tree, *node, modal))
+            {
                 self.focused_id = id;
             }
             return;
@@ -230,6 +271,7 @@ impl AccessibilityTree {
                         let node_id = self.map.get(id).unwrap();
                         let accessibility_state = tree.accessibility_state.get(node_id).unwrap();
                         accessibility_state.a11y_focusable == Focusable::Enabled
+                            && Self::inside_modal(tree, *node_id, modal)
                     })
                     .collect();
             }
@@ -247,7 +289,9 @@ impl AccessibilityTree {
                 {
                     return;
                 }
-                if accessibility_state.a11y_focusable == Focusable::Enabled {
+                if accessibility_state.a11y_focusable == Focusable::Enabled
+                    && Self::inside_modal(tree, node_id, modal)
+                {
                     nodes.push(accessibility_state.a11y_id);
                 }
             });

@@ -741,6 +741,16 @@ pub trait AccessibilityExt: Sized {
         self
     }
 
+    /// Constrain keyboard focus to this subtree while the modal is mounted.
+    fn a11y_modal(mut self, modal: bool) -> Self {
+        if modal {
+            self.get_accessibility_data().builder.set_modal();
+        } else {
+            self.get_accessibility_data().builder.clear_modal();
+        }
+        self
+    }
+
     /// Mark the element as a member of the group identified by the given [`AccessibilityId`].
     fn a11y_member_of(mut self, a11y_member_of: impl Into<AccessibilityId>) -> Self {
         self.get_accessibility_data()
