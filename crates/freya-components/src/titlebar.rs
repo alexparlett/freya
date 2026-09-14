@@ -21,7 +21,7 @@ define_theme! {
         color: Color,
         /// **Close**, hovered. The one action here with consequences, and every desktop paints it
         /// red rather than in the hover tone its neighbours use — a titlebar whose close button
-        /// highlights like minimize is one people mis-click.
+        /// highlights like minimize is one people click by mistake.
         ///
         /// Separate fields rather than a caller-side special case: [`TitlebarAction`] already
         /// tells this component which button is the destructive one, so where that button differs
