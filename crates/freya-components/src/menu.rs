@@ -349,7 +349,11 @@ impl ComponentOwned for MenuContainer {
                     .background(theme.background)
                     .corner_radius(theme.corner_radius)
                     .padding(theme.padding)
-                    .border(Border::new().width(MENU_BORDER_WIDTH).fill(theme.border_fill))
+                    .border(
+                        Border::new()
+                            .width(MENU_BORDER_WIDTH)
+                            .fill(theme.border_fill),
+                    )
                     .content(Content::fit())
                     .map(self.min_width, |el, w| el.min_width(w))
                     .map(self.min_height, |el, h| el.min_height(h))
