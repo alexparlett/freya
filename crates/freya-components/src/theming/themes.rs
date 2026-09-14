@@ -666,6 +666,13 @@ fn register_base_component_themes(theme: &mut Theme) {
         TitlebarButtonThemePreference {
             background: Preference::Specific(Color::TRANSPARENT),
             hover_background: Preference::reference("surface_secondary"),
+            color: Preference::reference("text_primary"),
+            // Specific rather than a palette reference: there is no danger tone in the palette,
+            // and the close button's red is a desktop convention rather than a theme's choice —
+            // Windows, GNOME and KDE all land within a few points of this one, in light and dark
+            // alike. A theme that wants its own still overrides it like any other field.
+            close_hover_background: Preference::Specific(Color::from_rgb(196, 43, 28)),
+            close_hover_color: Preference::Specific(Color::WHITE),
             corner_radius: Preference::Specific(CornerRadius::new_all(0.0)),
             width: Preference::Specific(Size::Pixels(Length::new(46.0))),
             height: Preference::Specific(Size::Fill),

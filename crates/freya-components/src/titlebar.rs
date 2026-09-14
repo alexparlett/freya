@@ -13,6 +13,21 @@ define_theme! {
         %[fields]
         background: Color,
         hover_background: Color,
+        /// The glyph's tint at rest.
+        ///
+        /// The icon is drawn with `currentColor`, so without this field a caller had to wrap the
+        /// button in a coloured parent to tint it — which meant the theme could not state the one
+        /// thing a titlebar button is mostly made of.
+        color: Color,
+        /// **Close**, hovered. The one action here with consequences, and every desktop paints it
+        /// red rather than in the hover tone its neighbours use — a titlebar whose close button
+        /// highlights like minimize is one people click by mistake.
+        ///
+        /// Separate fields rather than a caller-side special case: [`TitlebarAction`] already
+        /// tells this component which button is the destructive one, so where that button differs
+        /// is a fact the theme should be able to state.
+        close_hover_background: Color,
+        close_hover_color: Color,
         corner_radius: CornerRadius,
         width: Size,
         height: Size,
@@ -56,6 +71,14 @@ impl TitlebarButton {
         self.on_press = Some(on_press.into());
         self
     }
+
+    /// Override this button's theme, like every other themed component here — without it the
+    /// `theme` field is unreachable and the registered default is the only dress a titlebar
+    /// button can wear.
+    pub fn theme(mut self, theme: TitlebarButtonThemePartial) -> Self {
+        self.theme = Some(theme);
+        self
+    }
 }
 
 impl Component for TitlebarButton {
@@ -89,16 +112,20 @@ impl Component for TitlebarButton {
             .width(Size::px(12.))
             .height(Size::px(12.));
 
-        let background = if hovering() {
-            theme.hover_background
-        } else {
-            theme.background
+        // Close is the destructive action, so it carries its own hovered pair; the other three
+        // share the ordinary one.
+        let destructive = matches!(self.action, TitlebarAction::Close);
+        let (background, color) = match (hovering(), destructive) {
+            (true, true) => (theme.close_hover_background, theme.close_hover_color),
+            (true, false) => (theme.hover_background, theme.color),
+            (false, _) => (theme.background, theme.color),
         };
 
         rect()
             .width(theme.width)
             .height(theme.height)
             .background(background)
+            .color(color)
             .center()
             .on_pointer_enter(move |_| {
                 hovering.set(true);
@@ -106,6 +133,10 @@ impl Component for TitlebarButton {
             .on_pointer_leave(move |_| {
                 hovering.set(false);
             })
+            // A titlebar button sits inside a drag region by definition — that is what a titlebar
+            // is. Without this the press that activates the button also starts a window drag (and
+            // a double-press maximizes), so the stop belongs here rather than in every caller.
+            .on_pointer_down(|e: Event<PointerEventData>| e.stop_propagation())
             .map(self.on_press.clone(), |el, on_press| el.on_press(on_press))
             .child(icon)
     }
