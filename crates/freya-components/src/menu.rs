@@ -236,6 +236,10 @@ impl ComponentOwned for Menu {
     }
 }
 
+/// A menu panel's border. Named because [`SubMenu`] has to account for it when placing a flyout
+/// clear of the panel it opens from, and two spellings of it would drift.
+const MENU_BORDER_WIDTH: f32 = 1.;
+
 /// Container for menu items with proper spacing and layout.
 ///
 /// # Example
@@ -345,7 +349,11 @@ impl ComponentOwned for MenuContainer {
                     .background(theme.background)
                     .corner_radius(theme.corner_radius)
                     .padding(theme.padding)
-                    .border(Border::new().width(1.).fill(theme.border_fill))
+                    .border(
+                        Border::new()
+                            .width(MENU_BORDER_WIDTH)
+                            .fill(theme.border_fill),
+                    )
                     .content(Content::fit())
                     .map(self.min_width, |el, w| el.min_width(w))
                     .map(self.min_height, |el, h| el.min_height(h))
@@ -675,6 +683,8 @@ pub struct SubMenu {
     pub(crate) theme: Option<MenuContainerThemePartial>,
     label: Option<Element>,
     items: Vec<Element>,
+    min_width: Option<Size>,
+    min_height: Option<Size>,
     key: DiffKey,
 }
 
@@ -699,6 +709,22 @@ impl SubMenu {
         self.theme = Some(theme);
         self
     }
+
+    /// A minimum width for the flyout, like [`Menu::min_width`].
+    ///
+    /// Worth having for the same reason the root menu's is: a row that puts something on its
+    /// trailing edge — a shortcut hint, a submenu chevron — needs the container to have a width
+    /// before it can push anything to the far side of it.
+    pub fn min_width(mut self, min_width: impl Into<Size>) -> Self {
+        self.min_width = Some(min_width.into());
+        self
+    }
+
+    /// A minimum height for the flyout, like [`Menu::min_height`].
+    pub fn min_height(mut self, min_height: impl Into<Size>) -> Self {
+        self.min_height = Some(min_height.into());
+        self
+    }
 }
 
 impl ChildrenExt for SubMenu {
@@ -706,6 +732,10 @@ impl ChildrenExt for SubMenu {
         &mut self.items
     }
 }
+
+/// The gap between a submenu's flyout and the edge of the menu it opens from. Small on purpose —
+/// enough that the two panels read as separate rather than as one torn sheet.
+const SUBMENU_GAP: f32 = 2.;
 
 impl ComponentOwned for SubMenu {
     fn render(self) -> impl IntoElement {
@@ -721,6 +751,18 @@ impl ComponentOwned for SubMenu {
         });
 
         let show_submenu = menus.read().contains(&submenu_id);
+
+        // **How far past its row the flyout starts.** The anchor is positioned against the
+        // `MenuItem`, which sits *inside* the parent container's padding and border — so an offset
+        // that ignores those puts the flyout on top of the menu it came from by exactly their
+        // width. Derived from the theme rather than hardcoded, because the padding is a themeable
+        // field and a theme that widens it would otherwise re-open the overlap.
+        let container_theme = get_theme!(
+            self.theme.clone(),
+            MenuContainerThemePreference,
+            "menu_container"
+        );
+        let outset = container_theme.padding.right() + MENU_BORDER_WIDTH + SUBMENU_GAP;
 
         let on_pointer_enter = move |_| {
             close_menus_until(&mut menus, parent_menu_id);
@@ -738,13 +780,22 @@ impl ComponentOwned for SubMenu {
             .child(rect().horizontal().maybe_child(self.label.clone()))
             .maybe_child(show_submenu.then(|| {
                 rect()
-                    .position(Position::new_absolute().top(-8.).right(-10.))
+                    .position(Position::new_absolute().top(-8.).right(-outset))
                     .width(Size::px(0.))
                     .height(Size::px(0.))
                     .child(
-                        rect().width(Size::window_percent(100.)).child(
+                        // `Content::fit()`, not a window-width box. The flyout hangs off a 0x0
+                        // anchor, so it needs a parent that gives it room to lay out — but a
+                        // parent the width of the *window* is the width every `Size::Fill` child
+                        // inside the flyout then resolves against, and a menu row that says "as
+                        // wide as my menu" would stretch across the whole window. Fitting the
+                        // container makes that reference the flyout itself, which is what such a
+                        // row means; `min_width` is how a caller gives it a floor.
+                        rect().content(Content::fit()).child(
                             MenuContainer::new()
                                 .map(self.theme, |el, theme| el.theme(theme))
+                                .map(self.min_width, |el, w| el.min_width(w))
+                                .map(self.min_height, |el, h| el.min_height(h))
                                 .children(self.items),
                         ),
                     )
