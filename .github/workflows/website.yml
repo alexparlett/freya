@@ -1,4 +1,7 @@
-name: Website
+# Upstream builds the demo and then deploys it and the website to its Vercel project. The fork
+# has no such project and no Vercel secrets, so only the build is kept: it is what catches the
+# web demo failing to compile, which is the part that can break from a source change.
+name: Web demo
 
 on:
   workflow_dispatch:
@@ -19,14 +22,13 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 concurrency:
-  group: website-${{ github.ref }}
+  group: web-demo-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  build:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
 
@@ -58,13 +60,3 @@ jobs:
 
       - name: Build the demo
         run: just web-demo
-
-      - name: Deploy
-        uses: amondnet/vercel-action@de09aeac2ace6599ec9b11ef87558759a496bac4 # v42.3.0
-        with:
-          vercel-token: ${{ secrets.VERCEL_TOKEN }}
-          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
-          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          working-directory: website
-          vercel-args: ${{ github.ref == 'refs/heads/main' && '--prod' || '' }}
