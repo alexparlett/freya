@@ -163,12 +163,17 @@ impl ElementExt for CanvasElement {
             &paint,
         );
 
-        // Save before the transform and restore back to that exact level, so this element
-        // balances its own canvas stack. The bare `restore()` this replaces popped a level the
-        // element never pushed: it happened to unwind correctly only because the render
-        // pipeline brackets every element with `save()` / `restore_to_count`, so the canvas was
-        // spending the caller's save and relying on the caller to cover it.
+        // Save before the clip and transform and restore back to that exact level, so this
+        // element balances its own canvas stack. The bare `restore()` this replaces popped a
+        // level the element never pushed: it happened to unwind correctly only because the
+        // render pipeline brackets every element with `save()` / `restore_to_count`, so the
+        // canvas was spending the caller's save and relying on the caller to cover it.
         let saved = context.canvas.save();
+        context.canvas.clip_rect(
+            SkRect::new(area.min_x(), area.min_y(), area.max_x(), area.max_y()),
+            ClipOp::Intersect,
+            true,
+        );
         context.canvas.translate((area.min_x(), area.min_y()));
         context
             .canvas

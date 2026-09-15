@@ -44,6 +44,47 @@ pub fn scroll_view_wheel() {
 }
 
 #[test]
+pub fn scroll_view_smooth_scrolling() {
+    fn scroll_view_smooth_scrolling_app() -> impl IntoElement {
+        ScrollView::new()
+            .child(rect().height(Size::px(200.)).width(Size::px(200.)))
+            .child(rect().height(Size::px(200.)).width(Size::px(200.)))
+            .child(rect().height(Size::px(200.)).width(Size::px(200.)))
+            .child(rect().height(Size::px(200.)).width(Size::px(200.)))
+    }
+
+    let mut test = launch_test(scroll_view_smooth_scrolling_app);
+    let scrollview = test
+        .find(|node, element| {
+            Rect::try_downcast(element)
+                .filter(|rect| rect.accessibility.builder.role() == AccessibilityRole::ScrollView)
+                .map(move |_| node)
+        })
+        .unwrap();
+    let content = scrollview.children()[0].children()[0].children();
+
+    test.send_event(PlatformEvent::Wheel {
+        name: WheelEventName::Wheel,
+        scroll: (0., -300.).into(),
+        cursor: (5., 5.).into(),
+        source: WheelSource::Device,
+        granularity: WheelGranularity::Line,
+        timestamp: Instant::now(),
+    });
+    test.sync_and_update();
+
+    // A line-based wheel scroll animates, so nothing has moved yet
+    assert!(content[0].is_visible());
+    assert!(!content[3].is_visible());
+
+    test.poll(Duration::from_millis(16), Duration::from_secs(1));
+
+    // The animation has settled on the destination
+    assert!(!content[0].is_visible());
+    assert!(content[3].is_visible());
+}
+
+#[test]
 pub fn scroll_view_hover_updates_on_scroll() {
     fn scroll_view_hover_app() -> impl IntoElement {
         let mut hovered = use_state(|| None::<usize>);
@@ -96,6 +137,7 @@ pub fn scroll_view_scrollbar() {
     }
 
     let mut test = launch_test(scroll_view_scrollbar_app);
+    test.animation_clock().disable();
     let scrollview = test
         .find(|node, element| {
             Rect::try_downcast(element)
@@ -133,6 +175,7 @@ pub fn scroll_view_scrollbar() {
     for _ in 0..5 {
         test.press_key(Key::Named(NamedKey::ArrowUp));
     }
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     assert!(content[0].is_visible());
     assert!(content[1].is_visible());
@@ -141,6 +184,7 @@ pub fn scroll_view_scrollbar() {
 
     // Scroll to the bottom with arrows
     test.press_key(Key::Named(NamedKey::End));
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     assert!(!content[0].is_visible());
     assert!(content[1].is_visible());
@@ -464,6 +508,12 @@ pub fn scroll_view_wheel_acceleration() {
         content.iter().position(|child| child.is_visible()).unwrap()
     };
 
+    // A line-granularity wheel animates towards its destination, so what is on screen is only
+    // the accelerated distance once the smooth scroll has settled.
+    let settle = |test: &mut TestingRunner| {
+        test.poll(Duration::from_millis(16), Duration::from_secs(1));
+    };
+
     // A fast gesture: 53 pixels for the first notch, then the second accelerated to the ceiling
     // and capped at the 500 pixel viewport. 553 pixels in, the item spanning 400 to 600 is the
     // first still on screen.
@@ -472,6 +522,7 @@ pub fn scroll_view_wheel_acceleration() {
     let start = Instant::now();
     test.scroll_lines_at((5., 5.), (0., -1.), start);
     test.scroll_lines_at((5., 5.), (0., -1.), start + Duration::from_millis(15));
+    settle(&mut test);
     assert_eq!(first_visible_item(&test), 2);
 
     // The same two notches at a reading pace: 106 pixels, so the first item is still on screen.
@@ -480,5 +531,6 @@ pub fn scroll_view_wheel_acceleration() {
     let start = Instant::now();
     test.scroll_lines_at((5., 5.), (0., -1.), start);
     test.scroll_lines_at((5., 5.), (0., -1.), start + Duration::from_millis(90));
+    settle(&mut test);
     assert_eq!(first_visible_item(&test), 0);
 }

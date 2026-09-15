@@ -164,7 +164,7 @@ impl ClipboardProvider for ClipboardContext {
     }
 }
 
-/// Access the clipboard.
+/// App clipboard.
 ///
 /// # Examples
 ///
@@ -180,32 +180,23 @@ impl ClipboardProvider for ClipboardContext {
 /// Clipboard::set("Hello, Freya!".to_string());
 /// ```
 #[derive(Clone, Copy, PartialEq)]
-pub struct Clipboard;
+pub struct Clipboard(State<Option<Box<dyn ClipboardProvider>>>);
 
 impl Clipboard {
-    #[track_caller]
-    pub(crate) fn create_or_create() -> State<Option<Box<dyn ClipboardProvider>>> {
-        consume_root_context()
+    pub fn create(provider: Option<Box<dyn ClipboardProvider>>) -> Self {
+        Self(State::create_global(provider))
     }
 
-    // Read from the clipboard
+    /// Read from the clipboard.
     #[track_caller]
     pub fn get() -> Result<String, ClipboardError> {
-        Self::create_or_create()
-            .write()
-            .as_mut()
-            .ok_or(ClipboardError::NotAvailable)?
-            .get_text()
+        Self::with_provider(|provider| provider.get_text())?
     }
 
-    // Write to the clipboard
+    /// Write to the clipboard.
     #[track_caller]
     pub fn set(contents: String) -> Result<(), ClipboardError> {
-        Self::create_or_create()
-            .write()
-            .as_mut()
-            .ok_or(ClipboardError::NotAvailable)?
-            .set_text(contents)
+        Self::with_provider(|provider| provider.set_text(contents))?
     }
 
     /// Read an image from the clipboard.
@@ -220,11 +211,7 @@ impl Clipboard {
     /// }
     /// ```
     pub fn get_image() -> Result<ClipboardImage, ClipboardError> {
-        Self::create_or_create()
-            .write()
-            .as_mut()
-            .ok_or(ClipboardError::NotAvailable)?
-            .get_image()
+        Self::with_provider(|provider| provider.get_image())?
     }
 
     /// Write an image to the clipboard.
@@ -251,11 +238,16 @@ impl Clipboard {
         if !image.is_well_formed() {
             return Err(ClipboardError::FailedToSet);
         }
-        Self::create_or_create()
-            .write()
-            .as_mut()
-            .ok_or(ClipboardError::NotAvailable)?
-            .set_image(image)
+        Self::with_provider(|provider| provider.set_image(image))?
+    }
+
+    fn with_provider<T>(
+        run: impl FnOnce(&mut dyn ClipboardProvider) -> T,
+    ) -> Result<T, ClipboardError> {
+        let mut clipboard = GlobalContexts::get().get_context::<Clipboard>();
+        let mut provider = clipboard.0.write();
+        let provider = provider.as_mut().ok_or(ClipboardError::NotAvailable)?;
+        Ok(run(provider.as_mut()))
     }
 }
 

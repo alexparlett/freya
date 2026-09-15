@@ -170,8 +170,18 @@ pub struct StyledEventData {
 
 #[derive(Debug, Clone, PartialEq, Copy)]
 pub enum WheelSource {
+    /// Reported by a physical device: a mouse wheel, a touchpad, a precise pointer. How finely it
+    /// measured the delta is a separate question, see [WheelGranularity].
     Device,
+    /// Synthesized from code rather than observed from a device.
     Custom,
+}
+
+impl WheelSource {
+    /// Whether the event came from a physical device rather than being synthesized from code.
+    pub fn is_device(&self) -> bool {
+        matches!(self, Self::Device)
+    }
 }
 
 /// The resolution a wheel delta was reported at by the device that produced it.

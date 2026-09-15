@@ -40,6 +40,7 @@ use crate::{
         color::Color,
         corner_radius::CornerRadius,
         fill::Fill,
+        font_feature::FontFeature,
         font_size::FontSize,
         font_slant::FontSlant,
         font_weight::FontWeight,
@@ -117,7 +118,7 @@ impl Default for CursorStyleData {
     fn default() -> Self {
         Self {
             color: Color::BLACK,
-            highlight_color: Color::from_rgb(87, 108, 188),
+            highlight_color: Color::from_argb(128, 87, 108, 188),
             style: CursorStyle::default(),
         }
     }
@@ -141,6 +142,7 @@ pub struct TextStyleState {
     pub font_weight: FontWeight,
     pub font_width: FontWidth,
     pub letter_spacing: LetterSpacing,
+    pub font_features: Vec<FontFeature>,
 }
 
 impl Default for TextStyleState {
@@ -160,6 +162,7 @@ impl Default for TextStyleState {
             font_weight: FontWeight::default(),
             font_width: FontWidth::default(),
             letter_spacing: LetterSpacing::default(),
+            font_features: Vec::new(),
         }
     }
 }
@@ -184,6 +187,8 @@ impl TextStyleState {
         let letter_spacing = data.letter_spacing.unwrap_or(parent.letter_spacing);
         let mut font_families = data.font_families.clone();
         font_families.extend_from_slice(&parent.font_families);
+        let mut font_features = parent.font_features.clone();
+        font_features.extend_from_slice(&data.font_features);
 
         Self {
             color,
@@ -200,6 +205,7 @@ impl TextStyleState {
             font_width,
             letter_spacing,
             font_families,
+            font_features,
         }
     }
 
@@ -242,6 +248,7 @@ pub struct TextStyleData {
     pub font_weight: Option<FontWeight>,
     pub font_width: Option<FontWidth>,
     pub letter_spacing: Option<LetterSpacing>,
+    pub font_features: Vec<FontFeature>,
 }
 
 #[derive(Debug, Default)]
@@ -436,6 +443,7 @@ pub struct AccessibilityState {
     pub a11y_id: AccessibilityId,
     pub a11y_focusable: Focusable,
     pub a11y_member_of: Option<AccessibilityId>,
+    a11y_intrinsic_id: AccessibilityId,
 }
 
 impl AccessibilityState {
@@ -448,12 +456,15 @@ impl AccessibilityState {
     ) -> Self {
         let data = element.accessibility();
 
-        let a11y_id = if node_id == NodeId::ROOT {
+        let a11y_intrinsic_id = if node_id == NodeId::ROOT {
             ACCESSIBILITY_ROOT_ID
         } else {
-            data.a11y_id
-                .unwrap_or_else(|| AccessibilityId(accessibility_generator.new_id()))
+            AccessibilityId(accessibility_generator.new_id())
         };
+        let a11y_id = data
+            .a11y_id
+            .filter(|_| node_id != NodeId::ROOT)
+            .unwrap_or(a11y_intrinsic_id);
 
         accessibility_diff.add_or_update(node_id);
 
@@ -473,6 +484,7 @@ impl AccessibilityState {
             a11y_id,
             a11y_focusable: data.a11y_focusable.clone(),
             a11y_member_of: data.builder.member_of(),
+            a11y_intrinsic_id,
         }
     }
 
@@ -507,9 +519,8 @@ impl AccessibilityState {
             group.retain(|id| *id != self.a11y_id);
         }
 
-        if let Some(a11y_id) = data.a11y_id
-            && self.a11y_id != a11y_id
-        {
+        let a11y_id = data.a11y_id.unwrap_or(self.a11y_intrinsic_id);
+        if self.a11y_id != a11y_id {
             accessibility_diff.add_or_update(node_id);
             self.a11y_id = a11y_id;
         }

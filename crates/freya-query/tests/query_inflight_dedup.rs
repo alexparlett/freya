@@ -38,7 +38,7 @@ impl QueryCapability for SlowFetch {
         async move {
             runs.set(runs.get() + 1);
             while !gate.get() {
-                async_io::Timer::after(Duration::from_millis(5)).await;
+                timer(Duration::from_millis(5)).await;
             }
             Ok(keys)
         }
