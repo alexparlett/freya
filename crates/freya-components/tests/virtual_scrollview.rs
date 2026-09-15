@@ -60,6 +60,57 @@ pub fn virtual_scroll_view_wheel() {
 }
 
 #[test]
+pub fn virtual_scroll_view_smooth_scrolling() {
+    fn virtual_scroll_view_smooth_app() -> impl IntoElement {
+        VirtualScrollView::new(|item, _| {
+            label()
+                .key(item.index)
+                .height(Size::px(50.))
+                .text(format!("{} Hello, World!", item.index))
+                .into()
+        })
+        .length(30usize)
+        .item_size(50.)
+    }
+
+    let mut test = launch_test(virtual_scroll_view_smooth_app);
+    test.sync_and_update();
+    let scrollview = test
+        .find(|node, element| {
+            Rect::try_downcast(element)
+                .filter(|rect| rect.accessibility.builder.role() == AccessibilityRole::ScrollView)
+                .map(move |_| node)
+        })
+        .unwrap();
+
+    test.send_event(PlatformEvent::Wheel {
+        name: WheelEventName::Wheel,
+        scroll: (0., -300.).into(),
+        cursor: (5., 5.).into(),
+        source: WheelSource::Device,
+        granularity: WheelGranularity::Line,
+        timestamp: Instant::now(),
+    });
+    test.sync_and_update();
+
+    // A line-based wheel scroll animates, so the first item is still rendered
+    let content = scrollview.children()[0].children()[0].children();
+    assert_eq!(
+        Label::try_downcast(&*content[0].element()).unwrap().text,
+        "0 Hello, World!"
+    );
+
+    test.poll(Duration::from_millis(16), Duration::from_secs(1));
+
+    // The animation has settled, so the visible items start at 300 / 50 = 6
+    let content = scrollview.children()[0].children()[0].children();
+    assert_eq!(
+        Label::try_downcast(&*content[0].element()).unwrap().text,
+        "6 Hello, World!"
+    );
+}
+
+#[test]
 pub fn virtual_scroll_view_scrollbar() {
     fn virtual_scroll_view_scrollbar_app() -> impl IntoElement {
         VirtualScrollView::new(|item, _| {
@@ -74,6 +125,7 @@ pub fn virtual_scroll_view_scrollbar() {
     }
 
     let mut test = launch_test(virtual_scroll_view_scrollbar_app);
+    test.animation_clock().disable();
     test.sync_and_update();
     let scrollview = test
         .find(|node, element| {
@@ -121,6 +173,7 @@ pub fn virtual_scroll_view_scrollbar() {
     for _ in 0..11 {
         test.press_key(Key::Named(NamedKey::ArrowUp));
     }
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
     assert_eq!(content.len(), 11);
@@ -135,6 +188,7 @@ pub fn virtual_scroll_view_scrollbar() {
 
     // Scroll to the bottom with arrows
     test.press_key(Key::Named(NamedKey::End));
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
     assert_eq!(content.len(), 10);
@@ -486,6 +540,7 @@ pub fn virtual_scroll_view_keyboard_navigation() {
     }
 
     let mut test = launch_test(virtual_scroll_view_keyboard_app);
+    test.animation_clock().disable();
     test.sync_and_update();
 
     let scrollview = test
@@ -529,6 +584,7 @@ pub fn virtual_scroll_view_keyboard_navigation() {
     for _ in 0..5 {
         test.press_key(Key::Named(NamedKey::ArrowDown));
     }
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -542,6 +598,7 @@ pub fn virtual_scroll_view_keyboard_navigation() {
     for _ in 0..3 {
         test.press_key(Key::Named(NamedKey::ArrowUp));
     }
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -552,6 +609,7 @@ pub fn virtual_scroll_view_keyboard_navigation() {
 
     // Press End to jump to bottom
     test.press_key(Key::Named(NamedKey::End));
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -565,6 +623,7 @@ pub fn virtual_scroll_view_keyboard_navigation() {
 
     // Press Home to jump to top
     test.press_key(Key::Named(NamedKey::Home));
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -590,6 +649,7 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
     }
 
     let mut test = launch_test(virtual_scroll_view_horizontal_app);
+    test.animation_clock().disable();
     test.sync_and_update();
 
     let scrollview = test
@@ -633,6 +693,7 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
     for _ in 0..5 {
         test.press_key(Key::Named(NamedKey::ArrowRight));
     }
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -646,6 +707,7 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
     for _ in 0..3 {
         test.press_key(Key::Named(NamedKey::ArrowLeft));
     }
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -656,6 +718,7 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
 
     // Press End to jump to the right
     test.press_key(Key::Named(NamedKey::End));
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -668,6 +731,7 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
 
     // Press Home to jump to the left
     test.press_key(Key::Named(NamedKey::Home));
+    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -711,6 +775,12 @@ pub fn virtual_scroll_view_wheel_acceleration() {
             .to_string()
     };
 
+    // A line-granularity wheel animates towards its destination, so what is rendered is only the
+    // accelerated distance once the smooth scroll has settled.
+    let settle = |test: &mut TestingRunner| {
+        test.poll(Duration::from_millis(16), Duration::from_secs(1));
+    };
+
     // A fast gesture: the first notch moves the plain 53 pixels, having no rate to be measured
     // against, and the second is accelerated to the ceiling and capped at the 500 pixel viewport.
     // 553 pixels in, the first visible item is 553 / 50 = 11.
@@ -719,6 +789,7 @@ pub fn virtual_scroll_view_wheel_acceleration() {
     let start = Instant::now();
     test.scroll_lines_at((5., 5.), (0., -1.), start);
     test.scroll_lines_at((5., 5.), (0., -1.), start + Duration::from_millis(15));
+    settle(&mut test);
     assert_eq!(first_visible_item(&test), "11 Hello, World!");
 
     // The same two notches, arriving at a reading pace: 106 pixels, the plain rate, so the first
@@ -728,6 +799,7 @@ pub fn virtual_scroll_view_wheel_acceleration() {
     let start = Instant::now();
     test.scroll_lines_at((5., 5.), (0., -1.), start);
     test.scroll_lines_at((5., 5.), (0., -1.), start + Duration::from_millis(90));
+    settle(&mut test);
     assert_eq!(first_visible_item(&test), "2 Hello, World!");
 
     // The same distance from a trackpad, which the system has already accelerated: back to back,

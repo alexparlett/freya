@@ -52,7 +52,7 @@ impl QueryCapability for SlowFetch {
         let keys = *keys;
         async move {
             runs.set(runs.get() + 1);
-            async_io::Timer::after(Duration::from_millis(800)).await;
+            timer(Duration::from_millis(800)).await;
             Ok(keys)
         }
     }

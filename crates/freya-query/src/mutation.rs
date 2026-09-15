@@ -16,7 +16,6 @@ use std::{
     },
 };
 
-use async_io::Timer;
 use freya_core::{
     integration::FxHashSet,
     prelude::*,
@@ -278,7 +277,7 @@ impl<Q: MutationCapability> MutationsStorage<Q> {
 
         *clean_task = Some(spawn_forever(async move {
             // Wait as long as the clean time is configured
-            Timer::after(mutation.clean_time).await;
+            timer(mutation.clean_time).await;
 
             // Finally clear the mutation
             storage_clone.write_unchecked().remove(&mutation);

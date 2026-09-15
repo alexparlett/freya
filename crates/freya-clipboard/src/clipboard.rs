@@ -74,17 +74,18 @@ pub trait ClipboardProvider {
 /// *and* carries image data, and a second provider for text alone would put two connections on
 /// one selection.
 ///
-/// # Android
+/// # Android and the web
 ///
-/// There is no desktop clipboard to open, and arboard has no Android backend to build against, so
-/// on Android this is a context that never opens: [`new`](Self::new) answers
-/// [ClipboardError::NotAvailable] and the integration provides no provider at all, which is what
-/// every [Clipboard] call then reports. Reaching Android's own `ClipboardManager` means a JNI
-/// call through the activity, which belongs to whoever adds it, not to a stub.
-#[cfg(not(target_os = "android"))]
+/// There is no desktop clipboard to open, and arboard has a backend for neither, so on both this
+/// is a context that never opens: [`new`](Self::new) answers [ClipboardError::NotAvailable] and
+/// the integration provides no provider at all, which is what every [Clipboard] call then
+/// reports. Each platform's own clipboard is reached by its own route and belongs to whoever
+/// adds it, not to a stub: a JNI call through the activity on Android, and on the web the
+/// browser's, which `freya-web` supplies as a provider of its own.
+#[cfg(not(any(target_os = "android", target_family = "wasm")))]
 pub struct ClipboardContext(arboard::Clipboard);
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_family = "wasm")))]
 impl ClipboardContext {
     /// Open the desktop clipboard, or [ClipboardError::NotAvailable] where there is none.
     pub fn new() -> Result<Self, ClipboardError> {
@@ -94,7 +95,7 @@ impl ClipboardContext {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_family = "wasm")))]
 impl ClipboardProvider for ClipboardContext {
     fn get_text(&mut self) -> Result<String, ClipboardError> {
         self.0.get_text().map_err(|_| ClipboardError::FailedToRead)
@@ -129,15 +130,15 @@ impl ClipboardProvider for ClipboardContext {
     }
 }
 
-/// See [ClipboardContext]'s Android section: a context that never opens.
+/// See [ClipboardContext]'s Android and the web section: a context that never opens.
 ///
 /// The trait is still implemented because the integrations coerce a context to
 /// `Box<dyn ClipboardProvider>`, so the type has to satisfy it to compile; the impl is not
 /// reachable, since [`new`](Self::new) hands back no context to call it on.
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_family = "wasm"))]
 pub struct ClipboardContext;
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_family = "wasm"))]
 impl ClipboardContext {
     /// Always [ClipboardError::NotAvailable] on Android.
     pub fn new() -> Result<Self, ClipboardError> {
@@ -145,7 +146,7 @@ impl ClipboardContext {
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_family = "wasm"))]
 impl ClipboardProvider for ClipboardContext {
     fn get_text(&mut self) -> Result<String, ClipboardError> {
         Err(ClipboardError::NotAvailable)
@@ -164,7 +165,7 @@ impl ClipboardProvider for ClipboardContext {
     }
 }
 
-/// Access the clipboard.
+/// App clipboard.
 ///
 /// # Examples
 ///
@@ -180,32 +181,23 @@ impl ClipboardProvider for ClipboardContext {
 /// Clipboard::set("Hello, Freya!".to_string());
 /// ```
 #[derive(Clone, Copy, PartialEq)]
-pub struct Clipboard;
+pub struct Clipboard(State<Option<Box<dyn ClipboardProvider>>>);
 
 impl Clipboard {
-    #[track_caller]
-    pub(crate) fn create_or_create() -> State<Option<Box<dyn ClipboardProvider>>> {
-        consume_root_context()
+    pub fn create(provider: Option<Box<dyn ClipboardProvider>>) -> Self {
+        Self(State::create_global(provider))
     }
 
-    // Read from the clipboard
+    /// Read from the clipboard.
     #[track_caller]
     pub fn get() -> Result<String, ClipboardError> {
-        Self::create_or_create()
-            .write()
-            .as_mut()
-            .ok_or(ClipboardError::NotAvailable)?
-            .get_text()
+        Self::with_provider(|provider| provider.get_text())?
     }
 
-    // Write to the clipboard
+    /// Write to the clipboard.
     #[track_caller]
     pub fn set(contents: String) -> Result<(), ClipboardError> {
-        Self::create_or_create()
-            .write()
-            .as_mut()
-            .ok_or(ClipboardError::NotAvailable)?
-            .set_text(contents)
+        Self::with_provider(|provider| provider.set_text(contents))?
     }
 
     /// Read an image from the clipboard.
@@ -220,11 +212,7 @@ impl Clipboard {
     /// }
     /// ```
     pub fn get_image() -> Result<ClipboardImage, ClipboardError> {
-        Self::create_or_create()
-            .write()
-            .as_mut()
-            .ok_or(ClipboardError::NotAvailable)?
-            .get_image()
+        Self::with_provider(|provider| provider.get_image())?
     }
 
     /// Write an image to the clipboard.
@@ -251,11 +239,16 @@ impl Clipboard {
         if !image.is_well_formed() {
             return Err(ClipboardError::FailedToSet);
         }
-        Self::create_or_create()
-            .write()
-            .as_mut()
-            .ok_or(ClipboardError::NotAvailable)?
-            .set_image(image)
+        Self::with_provider(|provider| provider.set_image(image))?
+    }
+
+    fn with_provider<T>(
+        run: impl FnOnce(&mut dyn ClipboardProvider) -> T,
+    ) -> Result<T, ClipboardError> {
+        let mut clipboard = GlobalContexts::get().get_context::<Clipboard>();
+        let mut provider = clipboard.0.write();
+        let provider = provider.as_mut().ok_or(ClipboardError::NotAvailable)?;
+        Ok(run(provider.as_mut()))
     }
 }
 

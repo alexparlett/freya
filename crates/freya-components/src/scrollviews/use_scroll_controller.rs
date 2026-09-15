@@ -1,7 +1,10 @@
 use freya_core::prelude::*;
-use torin::prelude::{
-    Area,
-    Direction,
+use torin::{
+    geometry::Point2D,
+    prelude::{
+        Area,
+        Direction,
+    },
 };
 
 use crate::scrollviews::shared::get_corrected_scroll_position;
@@ -272,6 +275,11 @@ impl ScrollController {
                 }
             }
         }
+    }
+
+    pub(crate) fn position(self) -> Point2D {
+        let (x, y): (i32, i32) = self.into();
+        Point2D::new(x as f32, y as f32)
     }
 
     /// Scrolls the horizontal axis to `to` pixels. Returns whether the position actually changed.

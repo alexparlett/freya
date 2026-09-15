@@ -13,6 +13,7 @@ pub mod extended_hashmap;
 pub mod fifo_cache;
 pub mod helpers;
 pub mod hooks;
+pub mod io;
 pub mod layers;
 pub mod lifecycle;
 pub mod lru_cache;
@@ -113,6 +114,10 @@ pub mod prelude {
             previous_and_current::*,
             use_id::*,
         },
+        io::{
+            thread::thread,
+            timer::timer,
+        },
         layers::Layer,
         lifecycle::{
             base::*,
@@ -137,6 +142,7 @@ pub mod prelude {
             corner_radius::*,
             cursor::*,
             fill::*,
+            font_feature::*,
             font_size::*,
             font_slant::*,
             font_weight::*,
@@ -168,6 +174,7 @@ pub mod integration {
             dirty_nodes::*,
             focus_strategy::*,
             id::*,
+            ime::*,
             screen_reader::*,
             tree::*,
         },

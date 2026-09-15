@@ -4,14 +4,15 @@ use freya_core::{
         Event,
         EventHandlersExt,
         EventsCombos,
+        MouseButton,
         Platform,
         PointerEventData,
-        PressEventType,
         UserEvent,
         consume_root_context,
     },
     user_event::SingleThreadErasedEvent,
 };
+use freya_engine::prelude::Surface as SkiaSurface;
 use winit::window::{
     Window,
     WindowId,
@@ -184,40 +185,57 @@ pub trait WinitPlatformExt {
     fn post_callback<F, T: 'static>(&self, f: F) -> futures_channel::oneshot::Receiver<T>
     where
         F: FnOnce(WindowId, &mut RendererContext) -> T + 'static;
+
+    /// Queue a callback to be run on the next render pass with access to the Skia
+    /// [`Surface`](SkiaSurface) of the window, after rendering and before presenting.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use freya::prelude::*;
+    ///
+    /// async fn take_screenshot() {
+    ///     let image = Platform::get()
+    ///         .post_render_callback(|surface| surface.image_snapshot())
+    ///         .await;
+    /// }
+    /// ```
+    fn post_render_callback<F, T: 'static>(&self, f: F) -> futures_channel::oneshot::Receiver<T>
+    where
+        F: FnOnce(&mut SkiaSurface) -> T + 'static;
 }
 
 /// Makes a [`Rect`] behave like a native title bar.
 pub trait WindowDragExt {
-    /// Press the element to drag the window; double-press it to **fill** the window to the
-    /// current monitor (macOS *zoom*) or restore its previous size. Filling is not native
-    /// fullscreen — see [`Platform::is_maximized`] / [`Platform::is_fullscreen`].
+    /// Drag the window by pressing the element and moving; double-press it to **fill** the
+    /// window to the current monitor (macOS *zoom*) or restore its previous size. Filling is
+    /// not native fullscreen - see [`Platform::is_maximized`] / [`Platform::is_fullscreen`].
     ///
-    /// This installs an `on_pointer_down` handler, so an interactive child that must not drag
-    /// the window has to stop the event propagating.
+    /// This installs pointer handlers, so an interactive child that must not drag the window
+    /// has to stop the event propagating.
     fn window_drag(self) -> Self;
 }
 
 impl WindowDragExt for Rect {
     fn window_drag(self) -> Self {
-        self.on_pointer_down(move |e: Event<PointerEventData>| {
-            match EventsCombos::pressed(e.global_location()) {
-                PressEventType::Single => {
-                    Platform::get().with_window(None, |window| {
-                        let _ = window.drag_window();
-                    });
-                }
-                PressEventType::Double => {
-                    Platform::get().with_window(None, |window| {
-                        if window.is_maximized() {
-                            window.set_maximized(false);
-                        } else {
-                            window.set_maximized(true);
-                        }
-                    });
-                }
-                _ => {}
+        self.on_pointer_down(|e: Event<PointerEventData>| {
+            if e.button() != Some(MouseButton::Left) {
+                return;
+            }
+            if EventsCombos::pressed(e.global_location()).is_double() {
+                Platform::get().with_window(None, |window| {
+                    window.set_maximized(!window.is_maximized());
+                });
             }
         })
+        .on_global_pointer_move(|e: Event<PointerEventData>| {
+            if EventsCombos::moved(e.global_location()) {
+                Platform::get().with_window(None, |window| {
+                    let _ = window.drag_window();
+                });
+            }
+        })
+        .on_global_pointer_press(|_: Event<PointerEventData>| EventsCombos::released())
     }
 }
 
@@ -299,6 +317,24 @@ impl WinitPlatformExt for Platform {
         });
         self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
             NativeWindowErasedEventAction::RendererCallback(cb),
+        ))));
+        rx
+    }
+
+    fn post_render_callback<F, T: 'static>(&self, f: F) -> futures_channel::oneshot::Receiver<T>
+    where
+        F: FnOnce(&mut SkiaSurface) -> T + 'static,
+    {
+        let (tx, rx) = futures_channel::oneshot::channel::<T>();
+        self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
+            NativeWindowErasedEventAction::RendererCallback(Box::new(move |id, context| {
+                if let Some(app) = context.windows.get_mut(&id) {
+                    app.render_callbacks.push(Box::new(move |surface| {
+                        let _ = tx.send(f(surface));
+                    }));
+                    app.window.request_redraw();
+                }
+            })),
         ))));
         rx
     }

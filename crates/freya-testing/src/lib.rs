@@ -47,7 +47,9 @@ use std::{
     },
 };
 
+use accesskit::TreeUpdate;
 use freya_clipboard::prelude::{
+    Clipboard,
     ClipboardContext,
     ClipboardProvider,
 };
@@ -186,7 +188,15 @@ impl TestingRunner {
         let app = app.into();
         let mut runner = Runner::new(move || integration(app.clone()).into_element());
 
-        runner.provide_root_context(GlobalContexts::default);
+        runner.provide_root_context(|| {
+            let global_contexts = GlobalContexts::default();
+            global_contexts.insert_context(Clipboard::create(
+                ClipboardContext::new()
+                    .ok()
+                    .map(|clipboard| Box::new(clipboard) as Box<dyn ClipboardProvider>),
+            ));
+            global_contexts
+        });
 
         runner.provide_root_context(ScreenReader::new);
 
@@ -213,6 +223,7 @@ impl TestingRunner {
 
         let pending_fonts = Rc::new(RefCell::new(Vec::new()));
 
+        runner.provide_root_context(TargetPlatform::detect);
         let platform = runner.provide_root_context({
             let requested_focus_strategy = requested_focus_strategy.clone();
             let pending_fonts = pending_fonts.clone();
@@ -243,6 +254,7 @@ impl TestingRunner {
                             pending_fonts.borrow_mut().push((font_name, font_data));
                         }
                         UserEvent::RequestRedraw
+                        | UserEvent::OpenUrl(_)
                         | UserEvent::SetCustomScaleFactor(_)
                         | UserEvent::Erased(_) => {
                             // Nothing
@@ -250,14 +262,6 @@ impl TestingRunner {
                     }
                 }),
             }
-        });
-
-        runner.provide_root_context(|| {
-            let clipboard: Option<Box<dyn ClipboardProvider>> = ClipboardContext::new()
-                .ok()
-                .map(|c| Box::new(c) as Box<dyn ClipboardProvider>);
-
-            State::create(clipboard)
         });
 
         runner.provide_root_context(|| tree.borrow().accessibility_generator.clone());
@@ -415,7 +419,7 @@ impl TestingRunner {
         );
     }
 
-    pub fn commit_accessibility(&mut self) {
+    pub fn commit_accessibility(&mut self) -> TreeUpdate {
         let accessibility_update = self.accessibility.process_updates(
             &mut self.tree.borrow_mut(),
             &self.events_sender,
@@ -436,12 +440,14 @@ impl TestingRunner {
                 &tree,
                 "",
             ));
+
+        accessibility_update
     }
 
-    pub fn sync_and_update(&mut self) {
+    pub fn sync_and_update(&mut self) -> TreeUpdate {
         self.process_focus_strategy();
         self.process_events_and_layout();
-        self.commit_accessibility();
+        self.commit_accessibility()
     }
 
     /// Poll async tasks and events every `step` time for a total time of `duration`.
@@ -492,7 +498,8 @@ impl TestingRunner {
             name: MouseEventName::MouseMove,
             cursor: cursor.into(),
             button: Some(MouseButton::Left),
-        })
+        });
+        self.sync_and_update();
     }
 
     pub fn write_text(&mut self, text: impl ToString) {
