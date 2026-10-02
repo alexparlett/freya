@@ -20,9 +20,10 @@ use torin::{
     prelude::{
         Alignment,
         Area,
-        AreaModel,
         Content,
         Direction,
+        Point2D,
+        Vector2D,
     },
     size::Size,
 };
@@ -47,7 +48,7 @@ define_theme! {
     pub InputLayout {
         %[fields]
         corner_radius: CornerRadius,
-        inner_margin: Gaps,
+        padding: Gaps,
     }
 }
 
@@ -145,10 +146,6 @@ impl InputValidator {
 ///     let value = use_state(String::new);
 ///     Input::new(value).placeholder("Type here")
 /// }
-/// # use freya_testing::prelude::*;
-/// # launch_doc(|| {
-/// #   rect().center().expanded().child(app())
-/// # }, "./images/gallery_input.png").render();
 /// ```
 /// ## **Filled**
 ///
@@ -158,10 +155,6 @@ impl InputValidator {
 ///     let value = use_state(String::new);
 ///     Input::new(value).placeholder("Type here").filled()
 /// }
-/// # use freya_testing::prelude::*;
-/// # launch_doc(|| {
-/// #   rect().center().expanded().child(app())
-/// # }, "./images/gallery_filled_input.png").render();
 /// ```
 /// ## **Flat**
 ///
@@ -171,10 +164,6 @@ impl InputValidator {
 ///     let value = use_state(String::new);
 ///     Input::new(value).placeholder("Type here").flat()
 /// }
-/// # use freya_testing::prelude::*;
-/// # launch_doc(|| {
-/// #   rect().center().expanded().child(app())
-/// # }, "./images/gallery_flat_input.png").render();
 /// ```
 ///
 /// ## **States**
@@ -189,15 +178,7 @@ impl InputValidator {
 /// outside it only under [`Focus::Keyboard`], so keyboard focus stays distinguishable from a
 /// click.
 ///
-/// # Preview
-/// ![Input Preview][input]
-/// ![Filled Input Preview][filled_input]
-/// ![Flat Input Preview][flat_input]
-#[cfg_attr(feature = "docs",
-    doc = embed_doc_image::embed_image!("input", "images/gallery_input.png"),
-    doc = embed_doc_image::embed_image!("filled_input", "images/gallery_filled_input.png"),
-    doc = embed_doc_image::embed_image!("flat_input", "images/gallery_flat_input.png"),
-)]
+/// See the [interactive components demo](https://freyaui.dev/demo).
 #[derive(Clone, PartialEq)]
 pub struct Input {
     pub(crate) theme_colors: Option<InputColorsThemePartial>,
@@ -352,8 +333,8 @@ impl Input {
     /// every composer in the category binds. Without an
     /// [`on_submit`](Self::on_submit) there is nothing to submit *to*, so there Enter inserts a
     /// newline as well and the modifier is simply redundant.
-    pub fn multiline(mut self, multiline: bool) -> Self {
-        self.multiline = multiline;
+    pub fn multiline(mut self, multiline: impl Into<bool>) -> Self {
+        self.multiline = multiline.into();
         self
     }
 
@@ -393,7 +374,7 @@ impl Input {
     /// Set the input's height.
     ///
     /// Defaults to [`Size::Inner`], which is the input sized by its own content: the text line
-    /// box plus the layout theme's `inner_margin`. Set this when the input has to stand at a
+    /// box plus the layout theme's `padding`. Set this when the input has to stand at a
     /// height the surface dictates rather than the one its text happens to produce, for example
     /// beside a control of a fixed size in a form row.
     ///
@@ -542,28 +523,22 @@ impl Component for Input {
 
         let enabled = use_reactive(&self.enabled);
 
-        // **What a multiline box grows to.** The paragraph reports its laid-out height and the
-        // box takes it, clamped by [`Input::max_height`], so the box is exactly as tall as its
-        // text until the cap, and the `ScrollView` inside takes over from there. Written only on
-        // an actual change, or each layout pass would schedule the next one.
-        let mut content_height = use_state(|| 0.);
         let multiline_layout = self.multiline;
-        let resolved_height = match (self.multiline, self.max_height) {
-            // A height stated outright bounds the box directly and the `ScrollView` inside
-            // scrolls within it; only a height left at its default lets the box grow.
-            (true, _) if !matches!(self.height, Size::Inner) => self.height.clone(),
-            (true, Some(max)) => Size::px(
-                (*content_height.read() + theme_layout.inner_margin.vertical())
-                    .clamp(self.min_height.unwrap_or(0.).min(max), max),
-            ),
-            (true, None) => Size::Inner,
-            (false, _) => self.height.clone(),
-        };
 
         // Whether the box has a height of its own for the text to scroll inside. A box still
         // growing with its text must let that height through instead, or the `ScrollView`
         // would fill a parent that is itself sized by this content.
-        let bounded_height = multiline_layout && !matches!(resolved_height, Size::Inner);
+        let bounded_height = multiline_layout && !matches!(self.height, Size::Inner);
+
+        // **What a multiline box grows to.** A height stated outright bounds the box directly;
+        // left at its default, the box hugs its text between [`Input::min_height`] and
+        // [`Input::max_height`], and the `ScrollView` inside is capped at the same height, so
+        // past the cap the text scrolls rather than the box growing. Both are layout
+        // constraints, so the box follows its text in the same frame.
+        let growth = match (multiline_layout && !bounded_height, self.max_height) {
+            (true, Some(max)) => Some((self.min_height.unwrap_or(0.).min(max), max)),
+            _ => None,
+        };
 
         let display_placeholder = value.read().is_empty()
             && self.placeholder.is_some()
@@ -618,7 +593,7 @@ impl Component for Input {
 
         let mode = self.mode;
         let text_align = self.text_align;
-        let inner_margin = theme_layout.inner_margin;
+        let padding = theme_layout.padding;
         let multiline = self.multiline;
         let mut follow_cursor = move || {
             if !a11y_id.is_focused() || display_placeholder {
@@ -630,6 +605,7 @@ impl Component for Input {
             let Some(ParagraphHolderInner {
                 paragraph,
                 scale_factor,
+                ..
             }) = holder.as_ref()
             else {
                 warn!("Paragraph should be build by now.");
@@ -651,32 +627,29 @@ impl Component for Input {
             };
 
             let cursor_rect = paragraph.cursor_rect(&text, editor.cursor_pos(), text_align);
-            let cursor_x = cursor_rect.left / (*scale_factor as f32);
-
+            let cursor_location =
+                Point2D::new(cursor_rect.left, cursor_rect.top) / (*scale_factor as f32);
+            let visible_cursor_location =
+                cursor_location + Vector2D::new(padding.left(), padding.top());
             // Visible window start
             let visible_start_x = viewport.min_x() - area.peek().min_x();
 
             // Minimally reveal the cursor
-            if cursor_x < visible_start_x {
-                scroll_controller.scroll_to_x(-cursor_x as i32);
-            } else if cursor_x + inner_margin.horizontal() > visible_start_x + viewport.width() {
+            if visible_cursor_location.x < visible_start_x {
+                scroll_controller.scroll_to_x(-cursor_location.x as i32);
+            } else if visible_cursor_location.x > visible_start_x + viewport.width() {
                 scroll_controller
-                    .scroll_to_x(-(cursor_x + inner_margin.horizontal() - viewport.width()) as i32);
+                    .scroll_to_x(-(area.peek().width() - viewport.width()).max(0.0) as i32);
             }
 
             if multiline {
-                let cursor_top = cursor_rect.top / (*scale_factor as f32);
-                let cursor_bottom = cursor_rect.bottom / (*scale_factor as f32);
+                let cursor_bottom = cursor_rect.bottom / (*scale_factor as f32) + padding.bottom();
                 let visible_start_y = viewport.min_y() - area.peek().min_y();
 
-                if cursor_top < visible_start_y {
-                    scroll_controller.scroll_to_y(-cursor_top as i32);
-                } else if cursor_bottom + inner_margin.vertical()
-                    > visible_start_y + viewport.height()
-                {
-                    scroll_controller.scroll_to_y(
-                        -(cursor_bottom + inner_margin.vertical() - viewport.height()) as i32,
-                    );
+                if visible_cursor_location.y < visible_start_y {
+                    scroll_controller.scroll_to_y(-cursor_location.y as i32);
+                } else if cursor_bottom > visible_start_y + viewport.height() {
+                    scroll_controller.scroll_to_y(-(cursor_bottom - viewport.height()) as i32);
                 }
             }
         };
@@ -780,7 +753,7 @@ impl Component for Input {
             }
             movement_timeout.reset();
             if !display_placeholder {
-                let text_area = area.read().without_gaps(&inner_margin).to_f64();
+                let text_area = area.read().to_f64();
                 let global_location = e.global_location().clamp(text_area.min(), text_area.max());
                 let location = (global_location - text_area.min()).to_point();
                 editable.process_event(EditableEvent::Down {
@@ -816,7 +789,7 @@ impl Component for Input {
 
         let on_global_pointer_move = move |e: Event<PointerEventData>| {
             if a11y_id.is_focused() && *is_dragging.read() {
-                let text_area = area.read().without_gaps(&inner_margin).to_f64();
+                let text_area = area.read().to_f64();
                 let location = (e.global_location() - text_area.min()).to_point();
                 editable.process_event(EditableEvent::Move {
                     location,
@@ -837,7 +810,7 @@ impl Component for Input {
             }
         };
 
-        let on_global_pointer_press = move |_: Event<PointerEventData>| {
+        let on_global_pointer_up = move |_: Event<PointerEventData>| {
             match *status.read() {
                 InputStatus::Idle if a11y_id.is_focused() => {
                     editable.process_event(EditableEvent::Release);
@@ -886,17 +859,13 @@ impl Component for Input {
         let hovered = self.enabled && status() == InputStatus::Hovering;
 
         let on_paragraph_sized = move |e: Event<SizedEventData>| {
+            let viewport = viewport_area();
+            if viewport.width() > 0. {
+                scroll_controller.apply_layout(e.area.size, viewport);
+            }
+
             let text_size_changed = area.peek().size != e.area.size;
             area.set_if_modified(e.area);
-            // **The paragraph's own laid-out height.** `area` is the right signal here and
-            // `inner_sizes` is not: a paragraph's children are spans rather than laid-out
-            // nodes, so its accumulated inner size measures ~0 and a box following it
-            // collapses to its margins. The `ScrollView` above does not force this paragraph
-            // to fill, so `area` is the text's height rather than the box's, and the feedback
-            // settles rather than ratcheting.
-            if multiline_layout && *content_height.peek() != e.area.height() {
-                content_height.set(e.area.height());
-            }
             if text_size_changed {
                 follow_cursor();
             }
@@ -974,7 +943,7 @@ impl Component for Input {
                     .on_focus_press(on_input_focus_press)
                     .on_ime_preedit(on_ime_preedit)
                     .on_pointer_press(on_pointer_press)
-                    .on_global_pointer_press(on_global_pointer_press)
+                    .on_global_pointer_up(on_global_pointer_up)
                     .on_global_pointer_move(on_global_pointer_move)
             })
             .on_pointer_enter(on_pointer_enter)
@@ -985,7 +954,10 @@ impl Component for Input {
                 CursorIcon::NotAllowed
             })
             .width(self.width.clone())
-            .height(resolved_height)
+            .height(self.height.clone())
+            .map(growth, |el, (min, max)| {
+                el.min_height(Size::px(min)).max_height(Size::px(max))
+            })
             .background(background.mul_if(!self.enabled, 0.85))
             .border(border)
             .border(focus_ring)
@@ -1013,6 +985,7 @@ impl Component for Input {
                         true => Size::fill(),
                         false => Size::Inner,
                     })
+                    .map(growth, |el, (_, max)| el.max_height(Size::px(max)))
                     .direction(match self.multiline {
                         true => Direction::Vertical,
                         false => Direction::Horizontal,
@@ -1028,14 +1001,10 @@ impl Component for Input {
                             // no maximum. A multiline one has to **wrap**: fill the box, so the
                             // text breaks at its edge and the only axis that ever scrolls is the
                             // one the lines run down.
-                            .maybe(!multiline_layout, |el| {
-                                el.min_width(Size::func(move |context| {
-                                    Some(context.parent - theme_layout.inner_margin.horizontal())
-                                }))
-                            })
+                            .maybe(!multiline_layout, |el| el.min_width(Size::percent(100.)))
                             .maybe(multiline_layout, |el| el.width(Size::fill()))
                             .maybe(self.enabled, |el| el.on_focus_press(on_focus_press))
-                            .margin(theme_layout.inner_margin)
+                            .padding(theme_layout.padding)
                             .cursor_index(cursor_index)
                             .cursor_color(cursor_color)
                             .color(color)

@@ -191,14 +191,13 @@ impl Component for TerminalPanel {
                                                 }
                                                 _ => TerminalMouseButton::Left,
                                             };
-                                            let selection_type =
-                                                match EventsCombos::pressed(e.element_location) {
-                                                    PressEventType::Double => {
-                                                        SelectionType::Semantic
-                                                    }
-                                                    PressEventType::Triple => SelectionType::Lines,
-                                                    _ => SelectionType::Simple,
-                                                };
+                                            let selection_type = match EventsCombos::<()>::pressed(
+                                                e.element_location,
+                                            ) {
+                                                PressEventType::Double => SelectionType::Semantic,
+                                                PressEventType::Triple => SelectionType::Lines,
+                                                _ => SelectionType::Simple,
+                                            };
                                             handle.mouse_down(row, col, button, selection_type);
                                             e.stop_propagation();
                                             e.prevent_default();
@@ -235,7 +234,7 @@ impl Component for TerminalPanel {
                                             handle.mouse_up(row, col, button);
                                         }
                                     })
-                                    .on_global_pointer_press({
+                                    .on_global_pointer_up({
                                         let handle = handle.clone();
                                         move |_: Event<PointerEventData>| {
                                             handle.release();

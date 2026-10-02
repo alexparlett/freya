@@ -144,8 +144,6 @@ impl Component for Attached {
         let mut inner_area: State<Option<Area>> = use_state(|| None);
         let mut attached_area: State<Option<Area>> = use_state(|| None);
 
-        use_provide_context(|| AttachedHosted);
-
         let inner = *inner_area.read();
         let attached = *attached_area.read();
 
@@ -208,11 +206,28 @@ impl Component for Attached {
                     .position(position)
                     .layer(Layer::Overlay)
                     .opacity(if is_measured { 1. } else { 0. })
-                    .children(self.children.clone())
+                    .child(AttachedOverlay {
+                        children: self.children.clone(),
+                    })
             }))
     }
 
     fn render_key(&self) -> DiffKey {
         self.key.clone().or(self.default_key())
+    }
+}
+
+/// The attached content, marked as [`AttachedHosted`] for itself only: providing the marker from
+/// [`Attached`] would reach the inner element too, and a menu opened from a trigger inside an
+/// `Attached` would then skip its own overflow correction while nothing else positions it.
+#[derive(PartialEq)]
+struct AttachedOverlay {
+    children: Vec<Element>,
+}
+
+impl Component for AttachedOverlay {
+    fn render(&self) -> impl IntoElement {
+        use_provide_context(|| AttachedHosted);
+        rect().children(self.children.clone())
     }
 }

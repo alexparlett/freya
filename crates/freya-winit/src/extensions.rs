@@ -79,33 +79,18 @@ pub trait WinitPlatformExt {
     /// ```
     fn close_window(&self, window_id: WindowId);
 
-    /// Close the window this [`Platform`] is bound to.
-    ///
-    /// Unlike an OS-triggered close, this bypasses the window's
-    /// [`on_close`](crate::config::WindowConfig::with_on_close) hook — use it to actually
-    /// close after such a hook returned [`CloseDecision::KeepOpen`](crate::config::CloseDecision)
-    /// and the app has confirmed the close through its own UI.
-    fn close_current_window(&self);
-
     /// Focus a window by its [`WindowId`].
     ///
     /// # Example
     ///
     /// ```rust,no_run
-    /// use freya::{
-    ///     prelude::*,
-    ///     winit::window::WindowId,
-    /// };
-    ///
-    /// fn focus_specific_window(window_id: WindowId) {
-    ///     Platform::get().focus_window(Some(window_id));
-    /// }
+    /// use freya::prelude::*;
     ///
     /// fn focus_current_window() {
-    ///     Platform::get().focus_window(None);
+    ///     Platform::get().focus_window(Platform::window_id());
     /// }
     /// ```
-    fn focus_window(&self, window_id: Option<WindowId>);
+    fn focus_window(&self, window_id: WindowId);
 
     /// Make `child` a child window of `parent`, or detach it when `parent` is `None`.
     ///
@@ -135,22 +120,19 @@ pub trait WinitPlatformExt {
 
     /// Set the title of a window, also updating its accessibility label.
     ///
-    /// If `window_id` is `None`, the title will be applied to the current window.
-    ///
     /// # Example
     ///
     /// ```rust,no_run
     /// use freya::prelude::*;
     ///
     /// fn rename_current_window() {
-    ///     Platform::get().set_window_title(None, "New Title");
+    ///     Platform::get().set_window_title(Platform::window_id(), "New Title");
     /// }
     /// ```
-    fn set_window_title(&self, window_id: Option<WindowId>, title: impl Into<String>);
+    fn set_window_title(&self, window_id: WindowId, title: impl Into<String>);
 
     /// Execute a callback with mutable access to a [`Window`].
     ///
-    /// If `window_id` is `None`, the callback will be executed on the current window.
     /// This allows direct manipulation of the underlying winit [`Window`] for advanced use cases.
     ///
     /// To create new windows dynamically, see [`WinitPlatformExt::launch_window()`].
@@ -161,16 +143,12 @@ pub trait WinitPlatformExt {
     /// use freya::prelude::*;
     ///
     /// fn minimize_current_window() {
-    ///     Platform::get().with_window(None, |window| {
+    ///     Platform::get().with_window(Platform::window_id(), |window| {
     ///         window.set_minimized(true);
     ///     });
     /// }
     /// ```
-    fn with_window(
-        &self,
-        window_id: Option<WindowId>,
-        callback: impl FnOnce(&mut Window) + 'static,
-    );
+    fn with_window(&self, window_id: WindowId, callback: impl FnOnce(&mut Window) + 'static);
 
     /// Queue a callback to be run on the renderer thread with access to a [`RendererContext`].
     ///
@@ -205,6 +183,9 @@ pub trait WinitPlatformExt {
         F: FnOnce(&mut SkiaSurface) -> T + 'static;
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct WindowDragGesture;
+
 /// Makes a [`Rect`] behave like a native title bar.
 pub trait WindowDragExt {
     /// Drag the window by pressing the element and moving; double-press it to **fill** the
@@ -222,20 +203,22 @@ impl WindowDragExt for Rect {
             if e.button() != Some(MouseButton::Left) {
                 return;
             }
-            if EventsCombos::pressed(e.global_location()).is_double() {
-                Platform::get().with_window(None, |window| {
+            if EventsCombos::<WindowDragGesture>::pressed(e.global_location()).is_double() {
+                Platform::get().with_window(Platform::window_id(), |window| {
                     window.set_maximized(!window.is_maximized());
                 });
             }
         })
         .on_global_pointer_move(|e: Event<PointerEventData>| {
-            if EventsCombos::moved(e.global_location()) {
-                Platform::get().with_window(None, |window| {
+            if EventsCombos::<WindowDragGesture>::moved(e.global_location()) {
+                Platform::get().with_window(Platform::window_id(), |window| {
                     let _ = window.drag_window();
                 });
             }
         })
-        .on_global_pointer_press(|_: Event<PointerEventData>| EventsCombos::released())
+        .on_global_pointer_up(|_: Event<PointerEventData>| {
+            EventsCombos::<WindowDragGesture>::released();
+        })
     }
 }
 
@@ -261,15 +244,8 @@ impl WinitPlatformExt for Platform {
         ))));
     }
 
-    fn close_current_window(&self) {
-        // The bound window's id is only resolved on the renderer side, so hop there first
-        // and dispatch the close from the callback.
-        let platform = self.clone();
-        drop(self.post_callback(move |window_id, _| platform.close_window(window_id)));
-    }
-
-    fn focus_window(&self, window_id: Option<WindowId>) {
-        self.with_window(window_id, |w| w.focus_window());
+    fn focus_window(&self, window_id: WindowId) {
+        self.with_window(window_id, |window| window.focus_window());
     }
 
     fn set_window_parent(&self, child: WindowId, parent: Option<WindowId>) {
@@ -281,25 +257,21 @@ impl WinitPlatformExt for Platform {
         ))));
     }
 
-    fn set_window_title(&self, window_id: Option<WindowId>, title: impl Into<String>) {
+    fn set_window_title(&self, window_id: WindowId, title: impl Into<String>) {
         let title = title.into();
         self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
-            NativeWindowErasedEventAction::RendererCallback(Box::new(move |id, context| {
-                if let Some(app) = context.windows.get_mut(&window_id.unwrap_or(id)) {
+            NativeWindowErasedEventAction::RendererCallback(Box::new(move |_, context| {
+                if let Some(app) = context.windows.get_mut(&window_id) {
                     app.set_title(&title);
                 }
             })),
         ))));
     }
 
-    fn with_window(
-        &self,
-        window_id: Option<WindowId>,
-        callback: impl FnOnce(&mut Window) + 'static,
-    ) {
+    fn with_window(&self, window_id: WindowId, callback: impl FnOnce(&mut Window) + 'static) {
         self.send(UserEvent::Erased(SingleThreadErasedEvent(Box::new(
-            NativeWindowErasedEventAction::RendererCallback(Box::new(move |id, context| {
-                if let Some(app) = context.windows.get_mut(&window_id.unwrap_or(id)) {
+            NativeWindowErasedEventAction::RendererCallback(Box::new(move |_, context| {
+                if let Some(app) = context.windows.get_mut(&window_id) {
                     callback(&mut app.window);
                 }
             })),

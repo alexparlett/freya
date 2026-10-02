@@ -14,7 +14,6 @@ use crate::{
     events::{
         data::{
             MouseButton,
-            WheelGranularity,
             WheelSource,
         },
         name::EventName,
@@ -96,6 +95,8 @@ pub enum PlatformEvent {
         cursor: CursorPoint,
         button: Option<MouseButton>,
     },
+    /// The pointer exited the window at its last known position.
+    PointerExit { cursor: CursorPoint },
     /// A Keyboard Event.
     Keyboard {
         name: KeyboardEventName,
@@ -109,7 +110,6 @@ pub enum PlatformEvent {
         scroll: CursorPoint,
         cursor: CursorPoint,
         source: WheelSource,
-        granularity: WheelGranularity,
         timestamp: Instant,
     },
     /// A Touch Event.
@@ -197,6 +197,10 @@ impl ragnarok::SourceEvent for PlatformEvent {
         )
     }
 
+    fn is_pointer_exit(&self) -> bool {
+        matches!(self, Self::PointerExit { .. })
+    }
+
     /// Check if this event is a touch released event.
     fn is_touch_released(&self) -> bool {
         matches!(
@@ -211,6 +215,7 @@ impl ragnarok::SourceEvent for PlatformEvent {
     fn as_event_name(&self) -> EventName {
         match self {
             Self::Mouse { name, .. } => (*name).into(),
+            Self::PointerExit { .. } => EventName::MouseMove,
             Self::Keyboard { name, .. } => (*name).into(),
             Self::Wheel { name, .. } => (*name).into(),
             Self::ImePreedit { name, .. } => (*name).into(),

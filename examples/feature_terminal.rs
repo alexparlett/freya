@@ -31,7 +31,7 @@ fn app() -> impl IntoElement {
                 }
                 _ = terminal_handle.title_changed().fuse() => {
                     if let Some(new_title) = terminal_handle.title() {
-                        Platform::get().with_window(None, move |window| {
+                        Platform::get().with_window(Platform::window_id(), move |window| {
                             window.set_title(&new_title);
                         });
                     }
@@ -82,12 +82,12 @@ fn app() -> impl IntoElement {
                                     Some(MouseButton::Right) => TerminalMouseButton::Right,
                                     _ => TerminalMouseButton::Left,
                                 };
-                                let selection_type = match EventsCombos::pressed(e.element_location)
-                                {
-                                    PressEventType::Double => SelectionType::Semantic,
-                                    PressEventType::Triple => SelectionType::Lines,
-                                    _ => SelectionType::Simple,
-                                };
+                                let selection_type =
+                                    match EventsCombos::<()>::pressed(e.element_location) {
+                                        PressEventType::Double => SelectionType::Semantic,
+                                        PressEventType::Triple => SelectionType::Lines,
+                                        _ => SelectionType::Simple,
+                                    };
                                 handle.mouse_down(row, col, button, selection_type);
                             }
                         })
@@ -122,7 +122,7 @@ fn app() -> impl IntoElement {
                                 }
                             }
                         })
-                        .on_global_pointer_press({
+                        .on_global_pointer_up({
                             let handle = handle.clone();
                             move |_: Event<PointerEventData>| {
                                 handle.release();

@@ -11,7 +11,6 @@ use std::{
 
 use generational_box::{
     AnyStorage,
-    BorrowError,
     GenerationalBox,
     UnsyncStorage,
 };
@@ -291,7 +290,7 @@ pub type ReadRef<'a, T> =
 pub type WriteRef<'a, T> =
     <generational_box::UnsyncStorage as generational_box::AnyStorage>::Mut<'a, T>;
 
-impl<T> State<T> {
+impl<T: 'static> State<T> {
     /// Read the current value and subscribe the current component to changes.
     ///
     /// When the state value changes, any component or hook that has called `read()` will re-render.
@@ -304,7 +303,7 @@ impl<T> State<T> {
     /// let current_value = count.read();
     /// ```
     #[track_caller]
-    pub fn read(&self) -> ReadRef<'static, T> {
+    pub fn read(&self) -> ReadRef<'_, T> {
         let Some(value) = self.try_read() else {
             panic!("Reading the State failed because it is already borrowed or it was dropped.")
         };
@@ -324,7 +323,7 @@ impl<T> State<T> {
     ///     println!("{count}");
     /// }
     /// ```
-    pub fn try_read(&self) -> Option<ReadRef<'static, T>> {
+    pub fn try_read(&self) -> Option<ReadRef<'_, T>> {
         if let Some(mut rc) = ReactiveContext::try_current() {
             let subscribers = self.subscribers.try_read().ok()?;
             rc.subscribe(&subscribers);
@@ -364,7 +363,7 @@ impl<T> State<T> {
     ///
     /// Prefer `read()` over `peek()` unless you specifically need non-reactive access.
     #[track_caller]
-    pub fn peek(&self) -> ReadRef<'static, T> {
+    pub fn peek(&self) -> ReadRef<'_, T> {
         let Some(value) = self.try_peek() else {
             panic!("Peeking the State failed because it is already borrowed or it was dropped.")
         };
@@ -384,8 +383,24 @@ impl<T> State<T> {
     ///     println!("{count}");
     /// }
     /// ```
-    pub fn try_peek(&self) -> Option<ReadRef<'static, T>> {
+    pub fn try_peek(&self) -> Option<ReadRef<'_, T>> {
         self.key.try_read().ok()
+    }
+
+    /// Read the current value and subscribe to changes, returning a static guard.
+    ///
+    /// Use this when the guard must not be tied to the borrow of the [`State`] handle.
+    pub fn read_unchecked(&self) -> ReadRef<'static, T> {
+        self.subscribe();
+        self.peek_unchecked()
+    }
+
+    /// Read the current value without subscribing, returning a static guard.
+    ///
+    /// This bypasses the borrow of the [`State`] handle, but the underlying storage
+    /// still checks for conflicting runtime borrows.
+    pub fn peek_unchecked(&self) -> ReadRef<'static, T> {
+        self.key.read()
     }
 
     /// Get a mutable reference to the state value and notify subscribers.
@@ -415,51 +430,11 @@ impl<T> State<T> {
     /// - `with_mut()` for closure-based mutations
     /// - `set()` for replacing the entire value
     #[track_caller]
-    pub fn write(&mut self) -> WriteRef<'static, T> {
+    pub fn write(&mut self) -> WriteRef<'_, T> {
         let Some(value) = self.try_write() else {
             panic!("Writing to the State failed because it is already borrowed or it was dropped.")
         };
         value
-    }
-
-    /// Whether the value behind this state is still alive.
-    ///
-    /// A `State` is owned by the scope that created it, and every handle to it is `Copy`. A
-    /// handle held past that scope's unmount is not dangling in the unsafe sense, but reading or
-    /// writing through it panics.
-    ///
-    /// Long-lived work is what needs to ask. A task spawned with [`spawn_forever`] outlives the
-    /// component that started it by design, and when it finishes it may find the subtree whose
-    /// state it meant to update already gone. Cancelling such a task on unmount is the usual
-    /// answer; this is the other one, for work that must still run to completion and only wants
-    /// to know whether anyone is left to tell.
-    ///
-    /// ```rust,no_run
-    /// # use freya::prelude::*;
-    /// # async fn fetch() -> u32 { 0 }
-    /// # fn app() -> impl IntoElement {
-    /// let mut rows = use_state(|| 0);
-    /// spawn_forever(async move {
-    ///     let answer = fetch().await;
-    ///     if rows.is_alive() {
-    ///         rows.set(answer);
-    ///     }
-    /// });
-    /// # rect()
-    /// # }
-    /// ```
-    ///
-    /// [`spawn_forever`]: crate::prelude::spawn_forever
-    /// A state that is merely borrowed right now is still alive, so only the dropped case
-    /// answers `false`.
-    ///
-    /// The `'static` bound is spelled out because, unlike the reads and writes around it, this
-    /// returns a plain `bool` and so carries no implied bound from its return type.
-    pub fn is_alive(&self) -> bool
-    where
-        T: 'static,
-    {
-        !matches!(self.key.try_read(), Err(BorrowError::Dropped(_)))
     }
 
     /// Get a mutable reference to the state value and notify subscribers, or [None] if the
@@ -477,7 +452,7 @@ impl<T> State<T> {
     ///     *count += 1;
     /// }
     /// ```
-    pub fn try_write(&mut self) -> Option<WriteRef<'static, T>> {
+    pub fn try_write(&mut self) -> Option<WriteRef<'_, T>> {
         self.try_write_unchecked()
     }
 

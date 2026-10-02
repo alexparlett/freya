@@ -2,6 +2,7 @@ use freya_core::prelude::*;
 use thiserror::Error;
 use torin::{
     content::Content,
+    node::Node,
     prelude::{
         Area,
         Direction,
@@ -442,24 +443,12 @@ impl ResizableContext {
 ///         .panel(ResizablePanel::new(PanelSize::percent(50.)).child("Panel 1"))
 ///         .panel(ResizablePanel::new(PanelSize::percent(50.)).child("Panel 2"))
 /// }
-/// # use freya_testing::prelude::*;
-/// # launch_doc(|| {
-/// #   rect().center().expanded().child(
-/// #       ResizableContainer::new()
-/// #           .panel(ResizablePanel::new(PanelSize::percent(50.)).child("Panel 1"))
-/// #           .panel(ResizablePanel::new(PanelSize::percent(50.)).child("Panel 2"))
-/// #   )
-/// # }, "./images/gallery_resizable_container.png").render();
 /// ```
 ///
-/// # Preview
-/// ![ResizableContainer Preview][resizable_container]
-#[cfg_attr(feature = "docs",
-    doc = embed_doc_image::embed_image!("resizable_container", "images/gallery_resizable_container.png"),
-)]
+/// See the [interactive components demo](https://freyaui.dev/demo).
 #[derive(PartialEq, Clone)]
 pub struct ResizableContainer {
-    direction: Direction,
+    layout: LayoutData,
     panels: Vec<ResizablePanel>,
     controller: Option<Writable<ResizableContext>>,
     handle_size: f32,
@@ -471,10 +460,24 @@ impl Default for ResizableContainer {
     }
 }
 
+impl LayoutExt for ResizableContainer {
+    fn get_layout(&mut self) -> &mut LayoutData {
+        &mut self.layout
+    }
+}
+
+impl ContainerExt for ResizableContainer {}
+
 impl ResizableContainer {
     pub fn new() -> Self {
         Self {
-            direction: Direction::Vertical,
+            layout: Node {
+                width: Size::fill(),
+                height: Size::fill(),
+                content: Content::flex(),
+                ..Default::default()
+            }
+            .into(),
             panels: vec![],
             controller: None,
             handle_size: ResizableContext::HANDLE_SIZE,
@@ -482,7 +485,7 @@ impl ResizableContainer {
     }
 
     pub fn direction(mut self, direction: Direction) -> Self {
-        self.direction = direction;
+        self.layout.direction = direction;
         self
     }
 
@@ -516,11 +519,12 @@ impl Component for ResizableContainer {
         let mut size = use_state(Area::default);
         use_provide_context(|| size);
 
-        let direction = use_reactive(&self.direction);
+        let direction = use_reactive(&self.layout.direction);
+        let handle_size = use_reactive(&self.handle_size);
         let mut registry = use_provide_context(|| {
             self.controller.clone().unwrap_or_else(|| {
                 let mut state = State::create(ResizableContext {
-                    direction: self.direction,
+                    direction: self.layout.direction,
                     handle_size: self.handle_size,
                     ..Default::default()
                 });
@@ -532,6 +536,13 @@ impl Component for ResizableContainer {
                     }
                 });
 
+                Effect::create_sync_with_gen(move |current_gen| {
+                    let handle_size = handle_size();
+                    if current_gen > 0 {
+                        state.write().handle_size = handle_size;
+                    }
+                });
+
                 state.into_writable()
             })
         });
@@ -540,20 +551,35 @@ impl Component for ResizableContainer {
         // asked for, so shrinking squeezes them instead of letting them overflow, and growing
         // back restores them. Guarded on an actual change: `reflow` is a no-op at rest, and
         // writing regardless would wake every panel on each layout pass.
+        //
+        // What the panels and handles share is the container less its padding and the spacing
+        // between its children (every panel and every handle), so that is what is published to
+        // the handles and reflowed against.
+        let padding = self.layout.layout.padding;
+        let spacing =
+            self.layout.layout.spacing.get() * (self.panels.len() * 2).saturating_sub(2) as f32;
         let on_sized = move |e: Event<SizedEventData>| {
-            size.set(e.area);
-            let axis = match registry.peek().direction {
-                Direction::Horizontal => e.area.width(),
-                Direction::Vertical => e.area.height(),
+            let direction = registry.peek().direction;
+            let mut area = e.area;
+            area.origin.x += padding.left();
+            area.origin.y += padding.top();
+            area.size.width = (area.size.width - padding.horizontal()).max(0.);
+            area.size.height = (area.size.height - padding.vertical()).max(0.);
+            match direction {
+                Direction::Horizontal => area.size.width = (area.size.width - spacing).max(0.),
+                Direction::Vertical => area.size.height = (area.size.height - spacing).max(0.),
+            }
+            size.set(area);
+            let axis = match direction {
+                Direction::Horizontal => area.width(),
+                Direction::Vertical => area.height(),
             };
             registry.write_if(|mut registry| registry.reflow(axis));
         };
 
         rect()
-            .direction(self.direction)
+            .layout(self.layout.clone())
             .on_sized(on_sized)
-            .expanded()
-            .content(Content::flex())
             .children(self.panels.iter().enumerate().flat_map(|(i, e)| {
                 if i > 0 {
                     vec![
@@ -578,6 +604,7 @@ pub struct ResizablePanel {
     order: Option<usize>,
     on_resized: Option<EventHandler<f32>>,
     on_collapse: Option<EventHandler<()>>,
+    overflow: Overflow,
 }
 
 impl KeyExt for ResizablePanel {
@@ -604,6 +631,7 @@ impl ResizablePanel {
             order: None,
             on_resized: None,
             on_collapse: None,
+            overflow: Overflow::Clip,
         }
     }
 
@@ -658,6 +686,12 @@ impl ResizablePanel {
     /// whatever re-opens the panel is the caller's too.
     pub fn on_collapse(mut self, f: impl Into<EventHandler<()>>) -> Self {
         self.on_collapse = Some(f.into());
+        self
+    }
+
+    /// Sets how content is clipped inside the panel bounds.
+    pub fn overflow(mut self, overflow: impl Into<Overflow>) -> Self {
+        self.overflow = overflow.into();
         self
     }
 }
@@ -773,7 +807,7 @@ impl Component for ResizablePanel {
             // to nothing.
             .min_width(min_width)
             .min_height(min_height)
-            .overflow(Overflow::Clip)
+            .overflow(self.overflow)
             .on_sized(on_sized)
             .children(self.children.clone())
     }
@@ -903,11 +937,11 @@ impl Component for ResizableHandle {
             }
         };
 
-        let on_global_pointer_press = {
+        let on_global_pointer_up = {
             let mut registry = registry;
             move |_: Event<PointerEventData>| {
                 clicking.set_if_modified(false);
-                // Cleared outside the `clicking` guard, on any global press: a gesture that ends
+                // Cleared outside the `clicking` guard, on any global pointer up: a gesture that ends
                 // without this handle seeing its own pointer-up — the window losing focus
                 // mid-drag, say — would otherwise leave the flag set for good, and every later
                 // container squeeze would then be reported to `on_resized` as a user resize,
@@ -943,7 +977,7 @@ impl Component for ResizableHandle {
                 allow_resizing.set(true);
             })
             .on_pointer_down(on_pointer_down)
-            .on_global_pointer_press(on_global_pointer_press)
+            .on_global_pointer_up(on_global_pointer_up)
             .on_pointer_enter(on_pointer_enter)
             .on_capture_global_pointer_move(on_capture_global_pointer_move)
             .on_pointer_leave(on_pointer_leave)

@@ -116,24 +116,12 @@ impl Component for PopupBackground {
 ///                 .on_press(move |_| show_popup.toggle()),
 ///         )
 /// }
-/// # use freya_testing::prelude::*;
-/// # launch_doc(|| {
-/// #   rect().center().expanded().child(
-/// #      app()
-/// #   )
-/// # }, "./images/gallery_popup.png").with_scale_factor(0.8).with_hook(|test| {
-/// #   test.poll(std::time::Duration::from_millis(10), std::time::Duration::from_millis(500));
-/// # }).render();
 /// ```
 ///
-/// # Preview
-/// ![Popup Preview][popup]
+/// See the [interactive components demo](https://freyaui.dev/demo).
 #[doc(alias = "alert")]
 #[doc(alias = "dialog")]
 #[doc(alias = "window")]
-#[cfg_attr(feature = "docs",
-    doc = embed_doc_image::embed_image!("popup", "images/gallery_popup.png"),
-)]
 #[derive(Clone, PartialEq)]
 pub struct Popup {
     pub(crate) theme: Option<PopupThemePartial>,
@@ -260,6 +248,9 @@ impl Component for Popup {
                 PopupBackground::new(
                     rect()
                         .a11y_role(AccessibilityRole::Dialog)
+                        // Tab stays inside the popup while it is open, and is let go as soon as
+                        // it starts closing rather than once the fade has finished.
+                        .a11y_modal(show)
                         .scale((scale, scale))
                         .opacity(opacity)
                         .corner_radius(12.)

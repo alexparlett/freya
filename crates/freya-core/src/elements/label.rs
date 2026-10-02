@@ -16,6 +16,7 @@ use freya_engine::prelude::{
 use torin::prelude::{
     Area,
     Size2D,
+    SizeModel,
 };
 
 use crate::{
@@ -40,6 +41,7 @@ use crate::{
     prelude::{
         AccessibilityExt,
         ContainerExt,
+        EffectExt,
         EventHandlersExt,
         KeyExt,
         LayerExt,
@@ -96,8 +98,8 @@ pub struct LabelElement {
     pub event_handlers: EventHandlers,
     pub max_lines: Option<usize>,
     pub line_height: Option<f32>,
-    pub letter_spacing: Option<f32>,
     pub relative_layer: Layer,
+    pub effect: Option<EffectData>,
 }
 
 impl Default for LabelElement {
@@ -112,8 +114,8 @@ impl Default for LabelElement {
             event_handlers: Default::default(),
             max_lines: None,
             line_height: None,
-            letter_spacing: None,
             relative_layer: Layer::default(),
+            effect: None,
         }
     }
 }
@@ -147,9 +149,12 @@ impl ElementExt for LabelElement {
             diff.insert(DiffModifies::LAYER);
         }
 
+        if self.effect != label.effect {
+            diff.insert(DiffModifies::EFFECT);
+        }
+
         if self.text_style_data != label.text_style_data
             || self.line_height != label.line_height
-            || self.letter_spacing != label.letter_spacing
             || self.max_lines != label.max_lines
         {
             diff.insert(DiffModifies::TEXT_STYLE);
@@ -171,7 +176,7 @@ impl ElementExt for LabelElement {
     }
 
     fn effect(&'_ self) -> Option<Cow<'_, EffectData>> {
-        None
+        self.effect.as_ref().map(Cow::Borrowed)
     }
 
     fn style(&'_ self) -> Cow<'_, StyleState> {
@@ -203,13 +208,14 @@ impl ElementExt for LabelElement {
     }
 
     fn measure(&self, context: LayoutContext) -> Option<(Size2D, Rc<dyn Any>)> {
+        let content_area_size =
+            (*context.area_size - context.torin_node.padding.into()).max(Size2D::zero());
         let cached_paragraph = CachedParagraph {
             text_style_state: context.text_style_state,
             spans: &[Span::new(&*self.text)],
             max_lines: self.max_lines,
             line_height: self.line_height,
-            letter_spacing: self.letter_spacing,
-            width: context.area_size.width,
+            width: content_area_size.width,
         };
         let paragraph = context
             .text_cache
@@ -222,18 +228,12 @@ impl ElementExt for LabelElement {
                         paragraph_style.set_ellipsis(ellipsis);
                     }
 
-                    let mut text_style = context.text_style_state.to_text_style(
+                    let text_style = context.text_style_state.to_text_style(
                         context.fallback_fonts,
                         context.scale_factor,
                         self.line_height,
                         fill_area,
                     );
-
-                    // An explicit per-label spacing overrides the inherited one.
-                    if let Some(letter_spacing) = self.letter_spacing {
-                        text_style.set_letter_spacing(letter_spacing * context.scale_factor as f32);
-                    }
-
                     paragraph_style.set_text_style(&text_style);
                     paragraph_style.set_max_lines(self.max_lines);
                     paragraph_style.set_text_align(context.text_style_state.text_align.into());
@@ -252,7 +252,7 @@ impl ElementExt for LabelElement {
                         {
                             f32::MAX
                         } else {
-                            context.area_size.width + 1.0
+                            content_area_size.width + 1.0
                         },
                     );
                     paragraph
@@ -269,7 +269,9 @@ impl ElementExt for LabelElement {
                     .insert(context.node_id, &cached_paragraph, paragraph)
             });
 
-        let size = Size2D::new(paragraph.longest_line(), paragraph.height()).max(Size2D::zero());
+        let size = Size2D::new(paragraph.longest_line(), paragraph.height())
+            .max(Size2D::zero())
+            .with_gaps(&context.torin_node.padding);
 
         Some((size, paragraph))
     }
@@ -295,7 +297,10 @@ impl ElementExt for LabelElement {
         let layout_data = context.layout_node.data.as_ref().unwrap();
         let paragraph = layout_data.downcast_ref::<SkParagraph>().unwrap();
 
-        paragraph.paint_at(context.canvas, context.layout_node.visible_area().origin);
+        paragraph.paint_at(
+            context.canvas,
+            context.layout_node.inner_area.origin.cast_unit(),
+        );
     }
 }
 
@@ -330,6 +335,12 @@ impl AccessibilityExt for Label {
 impl TextStyleExt for Label {
     fn get_text_style_data(&mut self) -> &mut TextStyleData {
         &mut self.element.text_style_data
+    }
+}
+
+impl EffectExt for Label {
+    fn get_effect(&mut self) -> &mut EffectData {
+        self.element.effect.get_or_insert_with(EffectData::default)
     }
 }
 
@@ -370,13 +381,6 @@ impl Label {
     /// Override the height of each line as a multiple of the font size. Pass `None` for the default.
     pub fn line_height(mut self, line_height: impl Into<Option<f32>>) -> Self {
         self.element.line_height = line_height.into();
-        self
-    }
-
-    /// Extra spacing (in pixels, scaled by the device factor) inserted between glyphs. Pass `None`
-    /// for the default (0 — no extra tracking).
-    pub fn letter_spacing(mut self, letter_spacing: impl Into<Option<f32>>) -> Self {
-        self.element.letter_spacing = letter_spacing.into();
         self
     }
 }

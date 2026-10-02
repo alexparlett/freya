@@ -242,7 +242,7 @@ where
 
     #[track_caller]
     pub fn peek_unchecked(&self) -> ReadRef<'static, Value> {
-        self.value.peek()
+        self.value.peek_unchecked()
     }
 
     /// Read the current state value without subscribing to changes.
@@ -256,7 +256,7 @@ where
     /// ```
     #[track_caller]
     pub fn peek(&'_ self) -> ReadRef<'_, Value> {
-        self.value.peek()
+        self.value.peek_unchecked()
     }
 
     pub(crate) fn cleanup(&self) {
@@ -321,7 +321,11 @@ where
     /// ask, since it is designed to outlive the component that started it and may come back to a
     /// subtree that is gone. Cancelling the task on unmount is the usual answer; this is the one
     /// for work that must finish regardless and only needs to know whether there is anybody left
-    /// to notify.
+    /// to notify. For a plain [`State`](freya_core::prelude::State),
+    /// [`try_write`](freya_core::prelude::State::try_write) answers the same question.
+    ///
+    /// A station whose value is borrowed right now also reads as not alive, so ask outside any
+    /// read or write of it.
     ///
     /// ```rust, ignore
     /// # use freya::prelude::*;
@@ -334,7 +338,7 @@ where
     /// });
     /// ```
     pub fn is_alive(&self) -> bool {
-        self.value.is_alive()
+        self.value.try_peek().is_some()
     }
 }
 
@@ -551,7 +555,7 @@ where
     #[track_caller]
     pub fn read(&'_ self) -> ReadRef<'_, Value> {
         self.subscribe_if_not();
-        self.antenna.peek().station.value.peek()
+        self.antenna.peek().station.value.peek_unchecked()
     }
 
     /// Read the current state value inside a callback.
@@ -708,7 +712,7 @@ where
     Channel: RadioChannel<Value>,
     Value: 'static,
 {
-    fn write_state(&mut self) -> WriteRef<'static, Value> {
+    fn write_state(&mut self) -> WriteRef<'_, Value> {
         let antenna = self.antenna.peek();
         let channel = antenna.channel.clone();
         let value = antenna.station.value.write_unchecked();
@@ -719,7 +723,7 @@ where
         value
     }
 
-    fn peek_state(&self) -> ReadRef<'static, Value> {
+    fn peek_state(&self) -> ReadRef<'_, Value> {
         self.antenna.peek().station.peek_unchecked()
     }
 }

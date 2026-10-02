@@ -25,7 +25,7 @@ pub enum EventName {
     TouchEnd,
 
     GlobalPointerMove,
-    GlobalPointerPress,
+    GlobalPointerUp,
     GlobalPointerDown,
 
     GlobalKeyDown,
@@ -35,7 +35,7 @@ pub enum EventName {
     GlobalFileHoverCancelled,
 
     CaptureGlobalPointerMove,
-    CaptureGlobalPointerPress,
+    CaptureGlobalPointerUp,
 
     Wheel,
 
@@ -96,7 +96,7 @@ impl EventName {
     pub fn is_capture(&self) -> bool {
         matches!(
             &self,
-            Self::CaptureGlobalPointerMove | Self::CaptureGlobalPointerPress
+            Self::CaptureGlobalPointerMove | Self::CaptureGlobalPointerUp
         )
     }
 
@@ -105,10 +105,10 @@ impl EventName {
         matches!(
             self,
             Self::GlobalPointerMove
-                | Self::GlobalPointerPress
+                | Self::GlobalPointerUp
                 | Self::GlobalPointerDown
                 | Self::CaptureGlobalPointerMove
-                | Self::CaptureGlobalPointerPress
+                | Self::CaptureGlobalPointerUp
         )
     }
 
@@ -141,7 +141,7 @@ impl ragnarok::NameOfEvent for EventName {
     fn get_global_events(&self) -> HashSet<Self> {
         match self {
             Self::MouseUp | Self::TouchEnd => {
-                HashSet::from([Self::GlobalPointerPress, Self::CaptureGlobalPointerPress])
+                HashSet::from([Self::GlobalPointerUp, Self::CaptureGlobalPointerUp])
             }
             Self::MouseDown | Self::TouchStart => HashSet::from([Self::GlobalPointerDown]),
             Self::MouseMove | Self::TouchMove => {
@@ -196,9 +196,9 @@ impl ragnarok::NameOfEvent for EventName {
                 events.insert(Self::GlobalKeyUp);
             }
             Self::MouseUp | Self::TouchEnd => {
-                events.extend([Self::PointerPress, Self::GlobalPointerPress])
+                events.extend([Self::PointerPress, Self::GlobalPointerUp])
             }
-            Self::PointerPress => events.extend([Self::MouseUp, Self::GlobalPointerPress]),
+            Self::PointerPress => events.extend([Self::MouseUp, Self::GlobalPointerUp]),
             Self::MouseDown | Self::TouchStart => {
                 events.extend([Self::PointerDown, Self::GlobalPointerDown])
             }
@@ -213,12 +213,12 @@ impl ragnarok::NameOfEvent for EventName {
                     Self::GlobalPointerMove,
                 ]);
             }
-            Self::CaptureGlobalPointerPress => {
+            Self::CaptureGlobalPointerUp => {
                 events.extend([
                     Self::MouseUp,
                     Self::TouchEnd,
                     Self::PointerPress,
-                    Self::GlobalPointerPress,
+                    Self::GlobalPointerUp,
                 ]);
             }
 
@@ -233,7 +233,7 @@ impl ragnarok::NameOfEvent for EventName {
             self,
             Self::GlobalKeyDown
                 | Self::GlobalKeyUp
-                | Self::GlobalPointerPress
+                | Self::GlobalPointerUp
                 | Self::GlobalPointerDown
                 | Self::GlobalPointerMove
                 | Self::GlobalFileHover
@@ -324,16 +324,18 @@ mod test {
         EventName::TouchMove,
         EventName::TouchEnd,
         EventName::GlobalPointerMove,
-        EventName::GlobalPointerPress,
+        EventName::GlobalPointerUp,
         EventName::GlobalPointerDown,
         EventName::GlobalKeyDown,
         EventName::GlobalKeyUp,
         EventName::GlobalFileHover,
         EventName::GlobalFileHoverCancelled,
         EventName::CaptureGlobalPointerMove,
-        EventName::CaptureGlobalPointerPress,
+        EventName::CaptureGlobalPointerUp,
         EventName::Wheel,
         EventName::Sized,
+        EventName::Visible,
+        EventName::Hidden,
         EventName::Styled,
         EventName::FileDrop,
         EventName::ImePreedit,
@@ -366,7 +368,7 @@ mod test {
     fn ord_priority_classes() {
         use ragnarok::NameOfEvent as _;
         // Capture first, globals last, focused key events before their global variants.
-        assert!(EventName::CaptureGlobalPointerPress < EventName::KeyDown);
+        assert!(EventName::CaptureGlobalPointerUp < EventName::KeyDown);
         assert!(EventName::KeyDown < EventName::GlobalKeyDown);
         assert!(EventName::PointerLeave < EventName::PointerOut);
         assert!(EventName::PointerOver < EventName::PointerEnter);

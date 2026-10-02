@@ -1,6 +1,9 @@
 use std::{
     ops::Range,
-    time::Duration,
+    time::{
+        Duration,
+        Instant,
+    },
 };
 
 use freya_core::prelude::*;
@@ -18,24 +21,24 @@ use torin::{
 
 use crate::scrollviews::{
     ScrollBar,
-    ScrollBarThemePartial,
+    ScrollBarContext,
+    ScrollBarThumbEvents,
     ScrollConfig,
     ScrollController,
-    ScrollThumb,
     shared::{
         Axis,
+        WheelBehavior,
         WheelGestureClock,
-        accelerate_wheel_movement,
+        WheelTarget,
         get_container_sizes,
         get_corrected_scroll_position,
         get_scroll_position_from_cursor,
-        get_scroll_position_from_wheel,
         get_scrollbar_pos_and_size,
         handle_key_event,
+        handle_wheel,
         is_scrollbar_visible,
     },
     use_scroll_controller,
-    use_smooth_scroll,
 };
 
 /// Defines how each item of a [`VirtualScrollView`] is sized along the scroll axis.
@@ -58,8 +61,19 @@ pub enum ItemSize {
 }
 
 impl ItemSize {
+    /// Offset in pixels of the item at `index` from the start of the content.
+    ///
+    /// Sums the sizes before it for [`ItemSize::Dynamic`], so it costs one callback per item
+    /// before `index`.
+    pub fn offset_of(&self, index: usize) -> f32 {
+        match self {
+            Self::Fixed(size) => size * index as f32,
+            Self::Dynamic(callback) => (0..index).map(|index| callback.call(index)).sum(),
+        }
+    }
+
     /// Size in pixels of the item at `index`.
-    fn at(&self, index: usize) -> f32 {
+    pub fn at(&self, index: usize) -> f32 {
         match self {
             Self::Fixed(size) => *size,
             Self::Dynamic(callback) => callback.call(index),
@@ -189,21 +203,9 @@ pub struct VirtualItem {
 ///         .item_size(25.),
 ///     )
 /// }
-///
-/// # use freya_testing::prelude::*;
-/// # launch_doc(|| {
-/// #   rect().center().expanded().child(app())
-/// # }, "./images/gallery_virtual_scrollview.png").with_hook(|t| {
-/// #   t.move_cursor((125., 115.));
-/// #   t.sync_and_update();
-/// # });
 /// ```
 ///
-/// # Preview
-/// ![VirtualScrollView Preview][virtual_scrollview]
-#[cfg_attr(feature = "docs",
-    doc = embed_doc_image::embed_image!("virtual_scrollview", "images/gallery_virtual_scrollview.png")
-)]
+/// See the [interactive components demo](https://freyaui.dev/demo).
 #[derive(Clone)]
 pub struct VirtualScrollView<D, B: Fn(VirtualItem, &D) -> Element> {
     builder: B,
@@ -214,10 +216,13 @@ pub struct VirtualScrollView<D, B: Fn(VirtualItem, &D) -> Element> {
     show_scrollbar: bool,
     scroll_with_arrows: bool,
     scroll_controller: Option<ScrollController>,
+    on_sized: Option<EventHandler<Event<SizedEventData>>>,
     invert_scroll_wheel: bool,
     drag_scrolling: bool,
     wheel_axis_lock: Option<f32>,
-    scrollbar_theme: Option<ScrollBarThemePartial>,
+    contain_wheel: bool,
+    latch_wheel: bool,
+    scrollbar: Callback<ScrollBarContext, Element>,
     key: DiffKey,
 }
 
@@ -246,7 +251,9 @@ impl<D: PartialEq, B: Fn(VirtualItem, &D) -> Element> PartialEq for VirtualScrol
             && self.scroll_controller == other.scroll_controller
             && self.invert_scroll_wheel == other.invert_scroll_wheel
             && self.wheel_axis_lock == other.wheel_axis_lock
-            && self.scrollbar_theme == other.scrollbar_theme
+            && self.contain_wheel == other.contain_wheel
+            && self.latch_wheel == other.latch_wheel
+            && self.scrollbar == other.scrollbar
     }
 }
 
@@ -267,10 +274,13 @@ impl<B: Fn(VirtualItem, &()) -> Element> VirtualScrollView<(), B> {
             show_scrollbar: true,
             scroll_with_arrows: true,
             scroll_controller: None,
+            on_sized: None,
             invert_scroll_wheel: false,
             drag_scrolling: true,
             wheel_axis_lock: None,
-            scrollbar_theme: None,
+            contain_wheel: false,
+            latch_wheel: false,
+            scrollbar: ScrollBar::default_renderer(),
             key: DiffKey::None,
         }
     }
@@ -291,10 +301,13 @@ impl<B: Fn(VirtualItem, &()) -> Element> VirtualScrollView<(), B> {
             show_scrollbar: true,
             scroll_with_arrows: true,
             scroll_controller: Some(scroll_controller),
+            on_sized: None,
             invert_scroll_wheel: false,
             drag_scrolling: true,
             wheel_axis_lock: None,
-            scrollbar_theme: None,
+            contain_wheel: false,
+            latch_wheel: false,
+            scrollbar: ScrollBar::default_renderer(),
             key: DiffKey::None,
         }
     }
@@ -339,10 +352,13 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> VirtualScrollView<D, B> {
             show_scrollbar: true,
             scroll_with_arrows: true,
             scroll_controller: None,
+            on_sized: None,
             invert_scroll_wheel: false,
             drag_scrolling: true,
             wheel_axis_lock: None,
-            scrollbar_theme: None,
+            contain_wheel: false,
+            latch_wheel: false,
+            scrollbar: ScrollBar::default_renderer(),
             key: DiffKey::None,
         }
     }
@@ -368,10 +384,13 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> VirtualScrollView<D, B> {
             show_scrollbar: true,
             scroll_with_arrows: true,
             scroll_controller: Some(scroll_controller),
+            on_sized: None,
             invert_scroll_wheel: false,
             drag_scrolling: true,
             wheel_axis_lock: None,
-            scrollbar_theme: None,
+            contain_wheel: false,
+            latch_wheel: false,
+            scrollbar: ScrollBar::default_renderer(),
             key: DiffKey::None,
         }
     }
@@ -395,6 +414,21 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> VirtualScrollView<D, B> {
     /// ≈ always commit to the larger axis). Off by default (both axes scroll freely).
     pub fn wheel_axis_lock(mut self, threshold: f32) -> Self {
         self.wheel_axis_lock = Some(threshold);
+        self
+    }
+
+    /// Contains wheel scrolling to this view while its content overflows, so wheel events never
+    /// chain to an ancestor scrollable. See
+    /// [`ScrollView::contain_wheel`](crate::scrollviews::ScrollView::contain_wheel).
+    pub fn contain_wheel(mut self) -> Self {
+        self.contain_wheel = true;
+        self
+    }
+
+    /// Latches wheel gestures to this view, the macOS trackpad convention. See
+    /// [`ScrollView::latch_wheel`](crate::scrollviews::ScrollView::latch_wheel).
+    pub fn latch_wheel(mut self) -> Self {
+        self.latch_wheel = true;
         self
     }
 
@@ -431,9 +465,9 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> VirtualScrollView<D, B> {
         self
     }
 
-    /// Sets the theme used by the scrollbar.
-    pub fn scrollbar_theme(mut self, scrollbar_theme: ScrollBarThemePartial) -> Self {
-        self.scrollbar_theme = Some(scrollbar_theme);
+    /// Sets the renderer used for each visible scrollbar.
+    pub fn scrollbar(mut self, scrollbar: impl Into<Callback<ScrollBarContext, Element>>) -> Self {
+        self.scrollbar = scrollbar.into();
         self
     }
 
@@ -443,6 +477,12 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> VirtualScrollView<D, B> {
         scroll_controller: impl Into<Option<ScrollController>>,
     ) -> Self {
         self.scroll_controller = scroll_controller.into();
+        self
+    }
+
+    /// Runs the handler with the size of the visible area, which excludes the scrollbars.
+    pub fn on_sized(mut self, on_sized: impl Into<EventHandler<Event<SizedEventData>>>) -> Self {
+        self.on_sized = Some(on_sized.into());
         self
     }
 
@@ -486,7 +526,6 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
         let mut scroll_controller = self.scroll_controller.unwrap_or(own_controller);
         let mut dragging_content = use_state::<Option<CursorPoint>>(|| None);
         let mut drag_origin = use_state::<Option<CursorPoint>>(|| None);
-        let mut smooth_scroll = use_smooth_scroll(|| scroll_controller);
         let (scrolled_x, scrolled_y) = scroll_controller.into();
         let layout = &self.layout.layout;
         let direction = layout.direction;
@@ -508,12 +547,6 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
             ),
         };
 
-        // Before `use_apply`, so a mover called later in this frame reveals against this layout
-        // rather than the last one. `size.area` is the content box, fill-sized to the viewport (its
-        // own offset scrolls its children, not itself), so it is the fixed visible frame.
-        scroll_controller.set_viewport(size.read().area);
-        scroll_controller.use_apply(inner_width, inner_height);
-
         let corrected_scrolled_x =
             get_corrected_scroll_position(inner_width, size.read().area.width(), scrolled_x as f32);
 
@@ -523,8 +556,8 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
             scrolled_y as f32,
         );
 
-        let smooth_position =
-            smooth_scroll.position(Point2D::new(corrected_scrolled_x, corrected_scrolled_y));
+        let smooth_position = scroll_controller
+            .animated_position(Point2D::new(corrected_scrolled_x, corrected_scrolled_y));
         let rendered_position = Point2D::new(
             get_corrected_scroll_position(inner_width, size.read().area.width(), smooth_position.x),
             get_corrected_scroll_position(
@@ -534,10 +567,10 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
             ),
         );
 
-        let horizontal_scrollbar_is_visible = !timeout.elapsed()
-            && is_scrollbar_visible(self.show_scrollbar, inner_width, size.read().area.width());
-        let vertical_scrollbar_is_visible = !timeout.elapsed()
-            && is_scrollbar_visible(self.show_scrollbar, inner_height, size.read().area.height());
+        let horizontal_scrollbar_is_visible =
+            is_scrollbar_visible(self.show_scrollbar, inner_width, size.read().area.width());
+        let vertical_scrollbar_is_visible =
+            is_scrollbar_visible(self.show_scrollbar, inner_height, size.read().area.height());
 
         let (scrollbar_x, scrollbar_width) =
             get_scrollbar_pos_and_size(inner_width, size.read().area.width(), rendered_position.x);
@@ -551,11 +584,18 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
         let (container_height, content_height) = get_container_sizes(self.layout.height.clone());
 
         let scroll_with_arrows = self.scroll_with_arrows;
-        let invert_scroll_wheel = self.invert_scroll_wheel;
-        let wheel_axis_lock = self.wheel_axis_lock;
+        let wheel_behavior = WheelBehavior {
+            invert: self.invert_scroll_wheel,
+            axis_lock: self.wheel_axis_lock,
+            contain: self.contain_wheel,
+            latch: self.latch_wheel,
+        };
         let wheel_gesture_clock = WheelGestureClock::get();
+        // This view's latch decision for a wheel gesture, keyed by the gesture's identity.
+        // Only ever peeked, so handler writes never re-render the view per wheel tick.
+        let latch = use_state(|| None::<(Instant, bool)>);
 
-        let on_capture_global_pointer_press = move |e: Event<PointerEventData>| {
+        let on_capture_global_pointer_up = move |e: Event<PointerEventData>| {
             if clicking_scrollbar.read().is_some() {
                 e.prevent_default();
                 clicking_scrollbar.set(None);
@@ -564,7 +604,11 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
             if drag_scrolling && (dragging_content().is_some() || drag_origin().is_some()) {
                 if dragging_content().is_some() {
                     let content = Size2D::new(inner_width, inner_height);
-                    smooth_scroll.release_drag(rendered_position, content, size.read().area.size);
+                    scroll_controller.release_drag(
+                        rendered_position,
+                        content,
+                        size.read().area.size,
+                    );
                 }
                 dragging_content.set(None);
                 drag_origin.set(None);
@@ -572,74 +616,23 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
         };
 
         let on_wheel = move |e: Event<WheelEventData>| {
-            // Advance the shared wheel-gesture clock, which both reads this event's acceleration
-            // and keeps the clock honest for latching descendants.
-            let gesture = wheel_gesture_clock.advance(e.timestamp, e.granularity);
-            // Only invert direction on deviced-sourced wheel events
-            let invert_direction = e.source.is_device()
-                && (*pressing_shift.read() || invert_scroll_wheel)
-                && (!*pressing_shift.read() || !invert_scroll_wheel);
-
-            let (mut x_movement, mut y_movement) = if invert_direction {
-                (e.delta_y as f32, e.delta_x as f32)
-            } else {
-                (e.delta_x as f32, e.delta_y as f32)
-            };
-
-            // Axis lock: keep a dominant-axis gesture from drifting this view's cross axis (and
-            // swallowing the event from an outer scroll view). When one axis's delta exceeds the
-            // other by `threshold`×, zero the minor axis.
-            if let Some(threshold) = wheel_axis_lock {
-                let (ax, ay) = (x_movement.abs(), y_movement.abs());
-                if ay > ax * threshold {
-                    x_movement = 0.;
-                } else if ax > ay * threshold {
-                    y_movement = 0.;
-                }
+            let handled = handle_wheel(
+                &e,
+                wheel_behavior,
+                *pressing_shift.read(),
+                &wheel_gesture_clock,
+                latch,
+                &mut scroll_controller,
+                WheelTarget {
+                    content: Size2D::new(inner_width, inner_height),
+                    viewport: size.read().area,
+                    scrolled: Point2D::new(corrected_scrolled_x, corrected_scrolled_y),
+                    rendered: rendered_position,
+                },
+            );
+            if handled {
+                timeout.reset();
             }
-
-            // Acceleration, so a long list can be crossed with the wheel.
-            (x_movement, y_movement) = accelerate_wheel_movement(
-                (x_movement, y_movement),
-                e.granularity,
-                gesture,
-                size.read().area,
-            );
-
-            let animate = e.granularity == WheelGranularity::Line;
-            if animate {
-                smooth_scroll.animate_from(rendered_position);
-            } else {
-                smooth_scroll.stop();
-            }
-            let (base_x, base_y) = if animate {
-                (corrected_scrolled_x, corrected_scrolled_y)
-            } else {
-                (rendered_position.x, rendered_position.y)
-            };
-
-            // Vertical scroll
-            let scroll_position_y = get_scroll_position_from_wheel(
-                y_movement,
-                inner_height,
-                size.read().area.height(),
-                base_y,
-            );
-            scroll_controller.scroll_to_y(scroll_position_y).then(|| {
-                e.stop_propagation();
-            });
-
-            // Horizontal scroll
-            let scroll_position_x = get_scroll_position_from_wheel(
-                x_movement,
-                inner_width,
-                size.read().area.width(),
-                base_x,
-            );
-            scroll_controller.scroll_to_x(scroll_position_x).then(|| {
-                e.stop_propagation();
-            });
-            timeout.reset();
         };
 
         let on_mouse_move = move |_| {
@@ -652,7 +645,7 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
                     let coords = e.global_location();
                     let delta = prev - coords;
 
-                    smooth_scroll.drag(delta.to_f32());
+                    scroll_controller.drag(delta.to_f32());
                     scroll_controller.scroll_to_y((rendered_position.y - delta.y as f32) as i32);
                     scroll_controller.scroll_to_x((rendered_position.x - delta.x as f32) as i32);
 
@@ -672,7 +665,7 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
                     if distance.x > DRAG_THRESHOLD || distance.y > DRAG_THRESHOLD {
                         let delta = origin - coords;
 
-                        smooth_scroll.drag(delta.to_f32());
+                        scroll_controller.drag(delta.to_f32());
                         scroll_controller
                             .scroll_to_y((rendered_position.y - delta.y as f32) as i32);
                         scroll_controller
@@ -690,7 +683,7 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
             let clicking_scrollbar = clicking_scrollbar.peek();
 
             if clicking_scrollbar.is_some() {
-                smooth_scroll.stop();
+                scroll_controller.stop();
             }
 
             if let Some((Axis::Y, y)) = *clicking_scrollbar {
@@ -748,7 +741,7 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
                 viewport_width,
                 direction,
             ) {
-                smooth_scroll.animate_from(rendered_position);
+                scroll_controller.animate_from(rendered_position);
                 scroll_controller.scroll_to_x(x as i32);
                 scroll_controller.scroll_to_y(y as i32);
                 e.stop_propagation();
@@ -797,7 +790,7 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
 
         let on_pointer_down = move |e: Event<PointerEventData>| {
             if drag_scrolling && matches!(e.data(), PointerEventData::Touch(_)) {
-                smooth_scroll.begin_drag();
+                scroll_controller.begin_drag();
                 drag_origin.set(Some(e.global_location()));
             }
         };
@@ -818,7 +811,7 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
             })
             .scrollable(true)
             .on_wheel(on_wheel)
-            .on_capture_global_pointer_press(on_capture_global_pointer_press)
+            .on_capture_global_pointer_up(on_capture_global_pointer_up)
             .on_mouse_move(on_mouse_move)
             .on_capture_global_pointer_move(on_capture_global_pointer_move)
             .on_key_down(on_key_down)
@@ -838,41 +831,69 @@ impl<D: PartialEq + 'static, B: Fn(VirtualItem, &D) -> Element + 'static> Compon
                             .offset_x(offset_x)
                             .offset_y(offset_y)
                             .overflow(Overflow::Clip)
-                            .on_sized(move |e: Event<SizedEventData>| {
-                                size.set_if_modified(e.clone())
+                            .on_sized({
+                                let item_size = self.item_size.clone();
+                                let length = self.length;
+                                let on_sized = self.on_sized.clone();
+                                move |e: Event<SizedEventData>| {
+                                    size.set_if_modified(e.clone());
+                                    let content_size = match direction {
+                                        Direction::Vertical => Size2D::new(
+                                            e.inner_sizes.width,
+                                            item_size.total_size(
+                                                e.area.height(),
+                                                scrolled_y as f32,
+                                                length,
+                                            ),
+                                        ),
+                                        Direction::Horizontal => Size2D::new(
+                                            item_size.total_size(
+                                                e.area.width(),
+                                                scrolled_x as f32,
+                                                length,
+                                            ),
+                                            e.inner_sizes.height,
+                                        ),
+                                    };
+
+                                    scroll_controller.apply_layout(content_size, e.area);
+                                    if let Some(on_sized) = &on_sized {
+                                        on_sized.call(e);
+                                    }
+                                }
                             })
                             .children(children),
                     )
                     .maybe_child(vertical_scrollbar_is_visible.then_some({
-                        rect().child(ScrollBar {
-                            theme: self.scrollbar_theme.clone(),
-                            clicking_scrollbar,
+                        rect().child(self.scrollbar.call(ScrollBarContext {
                             axis: Axis::Y,
-                            offset: scrollbar_y,
-                            size: Size::px(size.read().area.height()),
-                            thumb: ScrollThumb {
-                                theme: self.scrollbar_theme.clone(),
-                                clicking_scrollbar,
-                                axis: Axis::Y,
-                                size: scrollbar_height,
-                            },
-                        })
+                            scroll_position: rendered_position,
+                            viewport_size: size.read().area.size,
+                            content_size: Size2D::new(inner_width, inner_height),
+                            scroll_controller,
+                            timeout,
+                            clicking_scrollbar,
+                            thumb_events: ScrollBarThumbEvents::new(Axis::Y, clicking_scrollbar),
+                            thumb_offset: scrollbar_y,
+                            track_size: Size::px(size.read().area.height()),
+                            thumb_length: scrollbar_height,
+                        }))
                     })),
             )
             .maybe_child(horizontal_scrollbar_is_visible.then_some({
-                rect().child(ScrollBar {
-                    theme: self.scrollbar_theme.clone(),
-                    clicking_scrollbar,
+                rect().child(self.scrollbar.call(ScrollBarContext {
                     axis: Axis::X,
-                    offset: scrollbar_x,
-                    size: Size::px(size.read().area.width()),
-                    thumb: ScrollThumb {
-                        theme: self.scrollbar_theme.clone(),
-                        clicking_scrollbar,
-                        axis: Axis::X,
-                        size: scrollbar_width,
-                    },
-                })
+                    scroll_position: rendered_position,
+                    viewport_size: size.read().area.size,
+                    content_size: Size2D::new(inner_width, inner_height),
+                    scroll_controller,
+                    timeout,
+                    clicking_scrollbar,
+                    thumb_events: ScrollBarThumbEvents::new(Axis::X, clicking_scrollbar),
+                    thumb_offset: scrollbar_x,
+                    track_size: Size::px(size.read().area.width()),
+                    thumb_length: scrollbar_width,
+                }))
             }))
     }
 

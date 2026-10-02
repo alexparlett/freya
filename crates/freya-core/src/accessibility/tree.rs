@@ -47,7 +47,6 @@ use crate::{
         TextAlign,
         TextDecoration,
         WheelEventData,
-        WheelGranularity,
         WheelSource,
     },
     tree::Tree,
@@ -205,14 +204,13 @@ impl AccessibilityTree {
         }
     }
 
+    /// The modal focus is held inside: the last one in document order when several are mounted,
+    /// which is the one drawn on top.
     fn active_modal(tree: &Tree) -> Option<NodeId> {
-        let mut modal = None;
-        tree.traverse_depth(|id| {
-            if tree.elements[&id].accessibility().builder.is_modal() {
-                modal = Some(id);
-            }
-        });
-        modal
+        tree.modal_nodes
+            .iter()
+            .copied()
+            .max_by(|a, b| tree.document_order(*a, *b))
     }
 
     fn inside_modal(tree: &Tree, mut id: NodeId, modal: Option<NodeId>) -> bool {
@@ -391,9 +389,6 @@ impl AccessibilityTree {
                         delta_x as f64,
                         delta_y as f64,
                         WheelSource::Custom,
-                        // An exact distance to travel, so it is reported as pixels: scaling it
-                        // would overshoot the element it is revealing.
-                        WheelGranularity::Pixel,
                         timestamp,
                         CursorPoint::default(),
                         CursorPoint::default(),

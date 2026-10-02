@@ -15,6 +15,7 @@ use crate::{
             WheelEventData,
         },
         name::EventName,
+        platform::MouseEventName,
     },
     integration::PlatformEvent,
     node_id::NodeId,
@@ -75,6 +76,17 @@ impl EmmitableEvent {
         let bubbles = name.does_bubble();
 
         match platform_event {
+            PlatformEvent::PointerExit { cursor } => Self::new(
+                node_id,
+                name,
+                PlatformEvent::Mouse {
+                    name: MouseEventName::MouseMove,
+                    cursor,
+                    button: None,
+                },
+                node_area,
+                scale_factor,
+            ),
             PlatformEvent::Mouse {
                 name: platform_event_name,
                 cursor,
@@ -187,7 +199,6 @@ impl EmmitableEvent {
                 name: platform_event_name,
                 scroll,
                 source,
-                granularity,
                 timestamp,
                 cursor,
                 ..
@@ -207,7 +218,6 @@ impl EmmitableEvent {
                         scroll.x,
                         scroll.y,
                         source,
-                        granularity,
                         timestamp,
                         global_location,
                         element_location,

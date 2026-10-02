@@ -893,14 +893,8 @@ pub fn use_query<Q: QueryCapability>(query: Query<Q>) -> UseQuery<Q> {
     let mut storage =
         GlobalContexts::get().get_context_or_insert(QueriesStorage::<Q>::create_global);
 
-    let mut reactive_context = use_hook(|| ReactiveContext::new_for_task().1);
-
     let mut make_query = |query: &Query<Q>, mut prev_query: Option<Query<Q>>| {
         let query_data = storage.insert_or_get_query(query.clone());
-
-        // Keep this use_query call subscribed to its current query
-        reactive_context.clear_subscriptions();
-        reactive_context.subscribe(&query_data.reactive_contexts);
 
         // Update the query tasks if there has been a change in the query
         if let Some(prev_query) = prev_query.take() {

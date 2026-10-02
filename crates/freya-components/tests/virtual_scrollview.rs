@@ -87,8 +87,7 @@ pub fn virtual_scroll_view_smooth_scrolling() {
         name: WheelEventName::Wheel,
         scroll: (0., -300.).into(),
         cursor: (5., 5.).into(),
-        source: WheelSource::Device,
-        granularity: WheelGranularity::Line,
+        source: WheelSource::Line,
         timestamp: Instant::now(),
     });
     test.sync_and_update();
@@ -560,12 +559,8 @@ pub fn virtual_scroll_view_keyboard_navigation() {
         "0 Hello, World!"
     );
 
-    // Focus the scrollview by clicking and dragging on the scrollbar, then moving back
-    test.move_cursor((495., 20.));
-    test.sync_and_update();
+    // Focus the scrollview without changing its scroll position.
     test.press_cursor((495., 20.));
-    test.sync_and_update();
-    test.move_cursor((495., 25.));
     test.sync_and_update();
     test.move_cursor((495., 20.));
     test.sync_and_update();
@@ -669,12 +664,8 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
         "0"
     );
 
-    // Focus the scrollview by clicking and dragging on the scrollbar, then moving back
-    test.move_cursor((20., 495.));
-    test.sync_and_update();
+    // Focus the scrollview without changing its scroll position.
     test.press_cursor((20., 495.));
-    test.sync_and_update();
-    test.move_cursor((25., 495.));
     test.sync_and_update();
     test.move_cursor((20., 495.));
     test.sync_and_update();
@@ -693,7 +684,7 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
     for _ in 0..5 {
         test.press_key(Key::Named(NamedKey::ArrowRight));
     }
-    test.poll(Duration::from_millis(1), Duration::from_millis(20));
+    test.poll_n(Duration::from_millis(1), 5);
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -707,7 +698,7 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
     for _ in 0..3 {
         test.press_key(Key::Named(NamedKey::ArrowLeft));
     }
-    test.poll(Duration::from_millis(1), Duration::from_millis(20));
+    test.poll_n(Duration::from_millis(1), 5);
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -718,7 +709,7 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
 
     // Press End to jump to the right
     test.press_key(Key::Named(NamedKey::End));
-    test.poll(Duration::from_millis(1), Duration::from_millis(20));
+    test.poll_n(Duration::from_millis(1), 5);
 
     let content = scrollview.children()[0].children()[0].children();
 
@@ -731,7 +722,7 @@ pub fn virtual_scroll_view_keyboard_navigation_horizontal() {
 
     // Press Home to jump to the left
     test.press_key(Key::Named(NamedKey::Home));
-    test.poll(Duration::from_millis(1), Duration::from_millis(20));
+    test.poll_n(Duration::from_millis(1), 5);
 
     let content = scrollview.children()[0].children()[0].children();
 

@@ -68,6 +68,7 @@ use freya_engine::prelude::{
     SkData,
     TypefaceFontProvider,
     raster_n32_premul,
+    register_font_typeface,
 };
 use ragnarok::{
     CursorPoint,
@@ -87,64 +88,12 @@ pub mod prelude {
     };
 
     pub use crate::{
-        DocRunner,
         TestingRunner,
-        launch_doc,
         launch_test,
     };
 }
 
-type DocRunnerHook = Box<dyn FnOnce(&mut TestingRunner)>;
-
 type PendingFonts = Rc<RefCell<Vec<(Cow<'static, str>, Bytes)>>>;
-
-pub struct DocRunner {
-    app: AppComponent,
-    size: Size2D,
-    scale_factor: f64,
-    hook: Option<DocRunnerHook>,
-    image_path: PathBuf,
-}
-
-impl DocRunner {
-    pub fn render(self) {
-        let (mut test, _) = TestingRunner::new(self.app, self.size, |_| {}, self.scale_factor);
-        if let Some(hook) = self.hook {
-            (hook)(&mut test);
-        }
-        test.render_to_file(self.image_path);
-    }
-
-    pub fn with_hook(mut self, hook: impl FnOnce(&mut TestingRunner) + 'static) -> Self {
-        self.hook = Some(Box::new(hook));
-        self
-    }
-
-    pub fn with_image_path(mut self, image_path: PathBuf) -> Self {
-        self.image_path = image_path;
-        self
-    }
-
-    pub fn with_scale_factor(mut self, scale_factor: f64) -> Self {
-        self.scale_factor = scale_factor;
-        self
-    }
-
-    pub fn with_size(mut self, size: Size2D) -> Self {
-        self.size = size;
-        self
-    }
-}
-
-pub fn launch_doc(app: impl Into<AppComponent>, path: impl Into<PathBuf>) -> DocRunner {
-    DocRunner {
-        app: app.into(),
-        size: Size2D::new(250., 250.),
-        scale_factor: 1.0,
-        hook: None,
-        image_path: path.into(),
-    }
-}
 
 pub fn launch_test(app: impl Into<AppComponent>) -> TestingRunner {
     TestingRunner::new(app, Size2D::new(500., 500.), |_| {}, 1.0).0
@@ -318,8 +267,7 @@ impl TestingRunner {
             .unwrap()
             .new_from_data(SkData::new_copy(font_data), None)
             .unwrap_or_else(|| panic!("Failed to load font {font_name}."));
-        self.font_provider
-            .register_typeface(typeface, Some(font_name));
+        register_font_typeface(&mut self.font_provider, font_name, typeface);
     }
 
     fn invalidate_text_layout(&mut self) {
@@ -601,7 +549,7 @@ impl TestingRunner {
     /// Scrolls by a delta in pixels, as a precise device such as a trackpad reports it. These are
     /// taken at face value, so the distance asked for is the distance scrolled.
     pub fn scroll(&mut self, cursor: impl Into<CursorPoint>, scroll: impl Into<CursorPoint>) {
-        self.scroll_wheel(cursor, scroll, WheelGranularity::Pixel, Instant::now());
+        self.scroll_wheel(cursor, scroll, WheelSource::Pixel, Instant::now());
     }
 
     /// Scrolls by a number of lines, as a mouse wheel reports it. Wheel acceleration applies, so
@@ -622,8 +570,8 @@ impl TestingRunner {
         let lines = lines.into();
         self.scroll_wheel(
             cursor,
-            lines * WheelGranularity::LINE_SIZE,
-            WheelGranularity::Line,
+            lines * WheelSource::LINE_SIZE,
+            WheelSource::Line,
             timestamp,
         );
     }
@@ -632,7 +580,7 @@ impl TestingRunner {
         &mut self,
         cursor: impl Into<CursorPoint>,
         scroll: impl Into<CursorPoint>,
-        granularity: WheelGranularity,
+        source: WheelSource,
         timestamp: Instant,
     ) {
         let cursor = cursor.into();
@@ -641,8 +589,7 @@ impl TestingRunner {
             name: WheelEventName::Wheel,
             scroll,
             cursor,
-            source: WheelSource::Device,
-            granularity,
+            source,
             timestamp,
         });
         self.sync_and_update();
