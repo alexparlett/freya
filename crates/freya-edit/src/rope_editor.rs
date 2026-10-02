@@ -384,6 +384,7 @@ mod test {
     use super::RopeEditor;
     use crate::{
         EditorHistory,
+        EditorLine,
         TextDragging,
         TextSelection,
         text_editor::TextEditor,
@@ -391,11 +392,8 @@ mod test {
 
     /// The drag state a press of `press` over `anchor` leaves behind.
     fn after_press(press: PressEventType, anchor: (usize, usize)) -> TextDragging {
-        let mut dragging = TextDragging {
-            clicked: true,
-            ..TextDragging::default()
-        };
-        dragging.pressed(press, &TextSelection::new_range(anchor));
+        let mut dragging = TextDragging::default();
+        dragging.start_selection(press, TextSelection::new_range(anchor));
         dragging
     }
 
@@ -451,25 +449,25 @@ mod test {
         let ed = editor("hello world\nsecond line");
 
         // A triple press selects the line so that removing it removes the line.
-        assert_eq!(ed.line_span(5), 0..12);
+        assert_eq!(ed.find_line_boundaries(5), (0, 12));
         // The caret and a delete-to-line-end both stop in front of the break.
         assert_eq!(ed.line_bounds(5), 0..11);
 
         // The last line has no terminator, so the two agree.
-        assert_eq!(ed.line_span(15), 12..23);
+        assert_eq!(ed.find_line_boundaries(15), (12, 23));
         assert_eq!(ed.line_bounds(15), 12..23);
     }
 
     #[test]
     fn a_drag_extends_by_the_unit_its_press_used() {
-        let ed = editor("hello world");
+        let mut ed = editor("hello world");
         let word = after_press(PressEventType::Double, (0, 5));
 
         // The pointer twitching inside the word the press selected keeps the word: the
         // regression a character-wise drag caused, leaving word-start to the pointer.
         for pointer in [0, 1, 4, 5] {
             assert_eq!(
-                ed.drag_selection(pointer, &word, TextSelection::new_range((0, 5))),
+                word.measure_selection(&ed, pointer, EditorLine::SingleParagraph),
                 TextSelection::new_range((0, 5)),
                 "pointer {pointer} broke the pressed word"
             );
@@ -477,21 +475,22 @@ mod test {
 
         // Dragging on past it extends by whole words, never mid-word.
         assert_eq!(
-            ed.drag_selection(8, &word, TextSelection::new_range((0, 5))),
+            word.measure_selection(&ed, 8, EditorLine::SingleParagraph),
             TextSelection::new_range((0, 11))
         );
 
         // Dragging back before it pivots on the far edge of the pressed word.
         let word = after_press(PressEventType::Double, (6, 11));
         assert_eq!(
-            ed.drag_selection(1, &word, TextSelection::new_range((6, 11))),
+            word.measure_selection(&ed, 1, EditorLine::SingleParagraph),
             TextSelection::new_range((11, 0))
         );
 
         // A single press still drags freely, character by character.
+        *ed.selection_mut() = TextSelection::new_range((2, 2));
         let caret = after_press(PressEventType::Single, (2, 2));
         assert_eq!(
-            ed.drag_selection(8, &caret, TextSelection::new_range((2, 2))),
+            caret.measure_selection(&ed, 8, EditorLine::SingleParagraph),
             TextSelection::new_range((2, 8))
         );
     }
@@ -502,11 +501,11 @@ mod test {
         let line = after_press(PressEventType::Triple, (0, 4));
 
         assert_eq!(
-            ed.drag_selection(2, &line, TextSelection::new_range((0, 4))),
+            line.measure_selection(&ed, 2, EditorLine::SingleParagraph),
             TextSelection::new_range((0, 4))
         );
         assert_eq!(
-            ed.drag_selection(5, &line, TextSelection::new_range((0, 4))),
+            line.measure_selection(&ed, 5, EditorLine::SingleParagraph),
             TextSelection::new_range((0, 8))
         );
     }

@@ -20,10 +20,10 @@ use torin::{
 
 use crate::scrollviews::{
     ScrollBar,
-    ScrollBarThemePartial,
+    ScrollBarContext,
+    ScrollBarThumbEvents,
     ScrollConfig,
     ScrollController,
-    ScrollThumb,
     shared::{
         Axis,
         WheelGestureClock,
@@ -38,7 +38,6 @@ use crate::scrollviews::{
         is_scrollbar_visible,
     },
     use_scroll_controller,
-    use_smooth_scroll,
 };
 
 /// Scrollable area with bidirectional support and scrollbars.
@@ -58,24 +57,9 @@ use crate::scrollviews::{
 ///     ScrollView::new()
 ///         .child("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Vestibulum laoreet tristique diam, ut gravida enim. Phasellus viverra vitae risus sit amet iaculis. Morbi porttitor quis nisl eu vulputate. Etiam vitae ligula a purus suscipit iaculis non ac risus. Suspendisse potenti. Aenean orci massa, ornare ut elit id, tristique commodo dui. Vestibulum laoreet tristique diam, ut gravida enim. Phasellus viverra vitae risus sit amet iaculis. Vestibulum laoreet tristique diam, ut gravida enim. Phasellus viverra vitae risus sit amet iaculis. Vestibulum laoreet tristique diam, ut gravida enim. Phasellus viverra vitae risus sit amet iaculis.")
 /// }
-///
-/// # use freya_testing::prelude::*;
-/// # launch_doc(|| {
-/// #   rect().center().expanded().child(app())
-/// # },
-/// # "./images/gallery_scrollview.png")
-/// #
-/// # .with_hook(|t| {
-/// #   t.move_cursor((125., 115.));
-/// #   t.sync_and_update();
-/// # });
 /// ```
 ///
-/// # Preview
-/// ![ScrollView Preview][scrollview]
-#[cfg_attr(feature = "docs",
-    doc = embed_doc_image::embed_image!("scrollview", "images/gallery_scrollview.png")
-)]
+/// See the [interactive components demo](https://freyaui.dev/demo).
 #[derive(Clone, PartialEq)]
 pub struct ScrollView {
     children: Vec<Element>,
@@ -89,7 +73,7 @@ pub struct ScrollView {
     contain_wheel: bool,
     latch_wheel: bool,
     on_sized: Option<EventHandler<Event<SizedEventData>>>,
-    scrollbar_theme: Option<ScrollBarThemePartial>,
+    scrollbar: Callback<ScrollBarContext, Element>,
     key: DiffKey,
 }
 
@@ -124,7 +108,7 @@ impl Default for ScrollView {
             contain_wheel: false,
             latch_wheel: false,
             on_sized: None,
-            scrollbar_theme: None,
+            scrollbar: ScrollBar::default_renderer(),
             key: DiffKey::None,
         }
     }
@@ -218,9 +202,9 @@ impl ScrollView {
         self
     }
 
-    /// Sets the theme used by the scrollbar.
-    pub fn scrollbar_theme(mut self, scrollbar_theme: ScrollBarThemePartial) -> Self {
-        self.scrollbar_theme = Some(scrollbar_theme);
+    /// Sets the renderer used for each visible scrollbar.
+    pub fn scrollbar(mut self, scrollbar: impl Into<Callback<ScrollBarContext, Element>>) -> Self {
+        self.scrollbar = scrollbar.into();
         self
     }
 
@@ -265,7 +249,6 @@ impl Component for ScrollView {
         let mut scroll_controller = self.scroll_controller.unwrap_or(own_controller);
         let mut dragging_content = use_state::<Option<CursorPoint>>(|| None);
         let mut drag_origin = use_state::<Option<CursorPoint>>(|| None);
-        let mut smooth_scroll = use_smooth_scroll(|| scroll_controller);
         let (scrolled_x, scrolled_y) = scroll_controller.into();
         let layout = &self.layout.layout;
         let direction = layout.direction;
@@ -277,15 +260,6 @@ impl Component for ScrollView {
         // This view's latch decision for a wheel gesture, keyed by the gesture's identity.
         // Only ever peeked, so handler writes never re-render the view per wheel tick.
         let mut latch = use_state(|| None::<(Instant, bool)>);
-
-        scroll_controller.use_apply(
-            size.read().inner_sizes.width,
-            size.read().inner_sizes.height,
-        );
-        // Publish the viewport rectangle so `ScrollController::scroll_to_item` can reveal a target
-        // from its own measured rectangle. `size.area` is the content box, which is fill-sized to the
-        // viewport (its own offset scrolls its children, not itself), so it's the fixed visible frame.
-        scroll_controller.set_viewport(size.read().area);
 
         let corrected_scrolled_x = get_corrected_scroll_position(
             size.read().inner_sizes.width,
@@ -299,8 +273,8 @@ impl Component for ScrollView {
             scrolled_y as f32,
         );
 
-        let smooth_position =
-            smooth_scroll.position(Point2D::new(corrected_scrolled_x, corrected_scrolled_y));
+        let smooth_position = scroll_controller
+            .animated_position(Point2D::new(corrected_scrolled_x, corrected_scrolled_y));
         let rendered_position = Point2D::new(
             get_corrected_scroll_position(
                 size.read().inner_sizes.width,
@@ -314,18 +288,16 @@ impl Component for ScrollView {
             ),
         );
 
-        let horizontal_scrollbar_is_visible = !timeout.elapsed()
-            && is_scrollbar_visible(
-                self.show_scrollbar,
-                size.read().inner_sizes.width,
-                size.read().area.width(),
-            );
-        let vertical_scrollbar_is_visible = !timeout.elapsed()
-            && is_scrollbar_visible(
-                self.show_scrollbar,
-                size.read().inner_sizes.height,
-                size.read().area.height(),
-            );
+        let horizontal_scrollbar_is_visible = is_scrollbar_visible(
+            self.show_scrollbar,
+            size.read().inner_sizes.width,
+            size.read().area.width(),
+        );
+        let vertical_scrollbar_is_visible = is_scrollbar_visible(
+            self.show_scrollbar,
+            size.read().inner_sizes.height,
+            size.read().area.height(),
+        );
 
         let (scrollbar_x, scrollbar_width) = get_scrollbar_pos_and_size(
             size.read().inner_sizes.width,
@@ -344,7 +316,7 @@ impl Component for ScrollView {
         let scroll_with_arrows = self.scroll_with_arrows;
         let invert_scroll_wheel = self.invert_scroll_wheel;
 
-        let on_capture_global_pointer_press = move |e: Event<PointerEventData>| {
+        let on_capture_global_pointer_up = move |e: Event<PointerEventData>| {
             if clicking_scrollbar.read().is_some() {
                 e.prevent_default();
                 clicking_scrollbar.set(None);
@@ -354,7 +326,7 @@ impl Component for ScrollView {
                 if dragging_content().is_some() {
                     let content = size.read().inner_sizes;
                     let viewport = size.read().area.size;
-                    smooth_scroll.release_drag(rendered_position, content, viewport);
+                    scroll_controller.release_drag(rendered_position, content, viewport);
                 }
                 dragging_content.set(None);
                 drag_origin.set(None);
@@ -436,9 +408,9 @@ impl Component for ScrollView {
 
             let animate = e.granularity == WheelGranularity::Line;
             if animate {
-                smooth_scroll.animate_from(rendered_position);
+                scroll_controller.animate_from(rendered_position);
             } else {
-                smooth_scroll.stop();
+                scroll_controller.stop();
             }
             let (base_x, base_y) = if animate {
                 (corrected_scrolled_x, corrected_scrolled_y)
@@ -497,7 +469,7 @@ impl Component for ScrollView {
                     let coords = e.global_location();
                     let delta = prev - coords;
 
-                    smooth_scroll.drag(delta.to_f32());
+                    scroll_controller.drag(delta.to_f32());
                     scroll_controller.scroll_to_y((rendered_position.y - delta.y as f32) as i32);
                     scroll_controller.scroll_to_x((rendered_position.x - delta.x as f32) as i32);
 
@@ -517,7 +489,7 @@ impl Component for ScrollView {
                     if distance.x > DRAG_THRESHOLD || distance.y > DRAG_THRESHOLD {
                         let delta = origin - coords;
 
-                        smooth_scroll.drag(delta.to_f32());
+                        scroll_controller.drag(delta.to_f32());
                         scroll_controller
                             .scroll_to_y((rendered_position.y - delta.y as f32) as i32);
                         scroll_controller
@@ -535,7 +507,7 @@ impl Component for ScrollView {
             let clicking_scrollbar = clicking_scrollbar.peek();
 
             if clicking_scrollbar.is_some() {
-                smooth_scroll.stop();
+                scroll_controller.stop();
             }
 
             if let Some((Axis::Y, y)) = *clicking_scrollbar {
@@ -593,7 +565,7 @@ impl Component for ScrollView {
                 viewport_width,
                 direction,
             ) {
-                smooth_scroll.animate_from(rendered_position);
+                scroll_controller.animate_from(rendered_position);
                 scroll_controller.scroll_to_x(x as i32);
                 scroll_controller.scroll_to_y(y as i32);
                 e.stop_propagation();
@@ -617,7 +589,7 @@ impl Component for ScrollView {
 
         let on_pointer_down = move |e: Event<PointerEventData>| {
             if drag_scrolling && matches!(e.data(), PointerEventData::Touch(_)) {
-                smooth_scroll.begin_drag();
+                scroll_controller.begin_drag();
                 drag_origin.set(Some(e.global_location()));
             }
         };
@@ -637,7 +609,7 @@ impl Component for ScrollView {
             .scrollable(true)
             .map(self.on_sized.clone(), |el, on_sized| el.on_sized(on_sized))
             .on_wheel(on_wheel)
-            .on_capture_global_pointer_press(on_capture_global_pointer_press)
+            .on_capture_global_pointer_up(on_capture_global_pointer_up)
             .on_mouse_move(on_mouse_move)
             .on_capture_global_pointer_move(on_capture_global_pointer_move)
             .on_key_down(on_key_down)
@@ -661,40 +633,41 @@ impl Component for ScrollView {
                             .spacing(layout.spacing.get())
                             .overflow(Overflow::Clip)
                             .on_sized(move |e: Event<SizedEventData>| {
-                                size.set_if_modified(e.clone())
+                                size.set_if_modified(e.clone());
+                                scroll_controller.apply_layout(e.inner_sizes, e.area);
                             })
                             .children(self.children.clone()),
                     )
                     .maybe_child(vertical_scrollbar_is_visible.then_some({
-                        rect().child(ScrollBar {
-                            theme: self.scrollbar_theme.clone(),
-                            clicking_scrollbar,
+                        rect().child(self.scrollbar.call(ScrollBarContext {
                             axis: Axis::Y,
-                            offset: scrollbar_y,
-                            size: Size::px(size.read().area.height()),
-                            thumb: ScrollThumb {
-                                theme: self.scrollbar_theme.clone(),
-                                clicking_scrollbar,
-                                axis: Axis::Y,
-                                size: scrollbar_height,
-                            },
-                        })
+                            scroll_position: rendered_position,
+                            viewport_size: size.read().area.size,
+                            content_size: size.read().inner_sizes,
+                            scroll_controller,
+                            timeout,
+                            clicking_scrollbar,
+                            thumb_events: ScrollBarThumbEvents::new(Axis::Y, clicking_scrollbar),
+                            thumb_offset: scrollbar_y,
+                            track_size: Size::px(size.read().area.height()),
+                            thumb_length: scrollbar_height,
+                        }))
                     })),
             )
             .maybe_child(horizontal_scrollbar_is_visible.then_some({
-                rect().child(ScrollBar {
-                    theme: self.scrollbar_theme.clone(),
-                    clicking_scrollbar,
+                rect().child(self.scrollbar.call(ScrollBarContext {
                     axis: Axis::X,
-                    offset: scrollbar_x,
-                    size: Size::px(size.read().area.width()),
-                    thumb: ScrollThumb {
-                        theme: self.scrollbar_theme.clone(),
-                        clicking_scrollbar,
-                        axis: Axis::X,
-                        size: scrollbar_width,
-                    },
-                })
+                    scroll_position: rendered_position,
+                    viewport_size: size.read().area.size,
+                    content_size: size.read().inner_sizes,
+                    scroll_controller,
+                    timeout,
+                    clicking_scrollbar,
+                    thumb_events: ScrollBarThumbEvents::new(Axis::X, clicking_scrollbar),
+                    thumb_offset: scrollbar_x,
+                    track_size: Size::px(size.read().area.width()),
+                    thumb_length: scrollbar_width,
+                }))
             }))
     }
 

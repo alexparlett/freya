@@ -28,6 +28,7 @@ use crate::{
     chip::ChipThemePreference,
     color_picker::ColorPickerThemePreference,
     floating_tab::FloatingTabThemePreference,
+    icons::IconThemePreference,
     input::{
         InputColorsThemePreference,
         InputLayoutThemePreference,
@@ -340,11 +341,16 @@ fn register_base_component_themes(theme: &mut Theme) {
     theme.set(
         "scrollbar",
         ScrollBarThemePreference {
-            background: Preference::reference("surface_primary"),
+            background: Preference::reference("border"),
             thumb_background: Preference::reference("surface_inverse"),
             hover_thumb_background: Preference::reference("surface_inverse_secondary"),
             active_thumb_background: Preference::reference("surface_inverse_tertiary"),
-            size: Preference::Specific(15.),
+            thumb_cross_size: Preference::Specific(5.),
+            expanded_thumb_cross_size: Preference::Specific(8.),
+            opacity: Preference::Specific(0.),
+            expanded_opacity: Preference::Specific(220.),
+            cross_gap: Preference::Specific(0.),
+            expanded_cross_gap: Preference::Specific(3.),
         },
     );
     theme.set(
@@ -398,21 +404,21 @@ fn register_base_component_themes(theme: &mut Theme) {
         "input_layout",
         InputLayoutThemePreference {
             corner_radius: Preference::Specific(CornerRadius::new_all(6.)),
-            inner_margin: Preference::Specific(Gaps::new(8., 8., 8., 8.)),
+            padding: Preference::Specific(Gaps::new(8., 8., 8., 8.)),
         },
     );
     theme.set(
         "compact_input_layout",
         InputLayoutThemePreference {
             corner_radius: Preference::Specific(CornerRadius::new_all(4.)),
-            inner_margin: Preference::Specific(Gaps::new(4., 6., 4., 6.)),
+            padding: Preference::Specific(Gaps::new(4., 6., 4., 6.)),
         },
     );
     theme.set(
         "expanded_input_layout",
         InputLayoutThemePreference {
             corner_radius: Preference::Specific(CornerRadius::new_all(8.)),
-            inner_margin: Preference::Specific(Gaps::new(12., 12., 12., 12.)),
+            padding: Preference::Specific(Gaps::new(12., 12., 12., 12.)),
         },
     );
     theme.set(
@@ -545,6 +551,12 @@ fn register_base_component_themes(theme: &mut Theme) {
             max_height: Preference::Specific(Size::window_percent(90.)),
             padding: Preference::Specific(Gaps::new_all(8.)),
             spacing: Preference::Specific(4.),
+        },
+    );
+    theme.set(
+        "icon",
+        IconThemePreference {
+            fill: Preference::reference("text_primary"),
         },
     );
     theme.set(

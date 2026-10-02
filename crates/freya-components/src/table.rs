@@ -2,6 +2,7 @@ use freya_core::prelude::*;
 use torin::{
     content::Content,
     gaps::Gaps,
+    node::Node,
     prelude::Alignment,
     size::Size,
 };
@@ -9,7 +10,11 @@ use torin::{
 use crate::{
     define_theme,
     get_theme,
-    icons::arrow::ArrowIcon,
+    icons::{
+        IconThemePartialExt,
+        arrow::ArrowIcon,
+    },
+    theming::hooks::get_theme_or_default,
 };
 
 define_theme! {
@@ -44,6 +49,7 @@ pub enum OrderDirection {
     Down,
 }
 
+/// An arrow showing the [OrderDirection] a column is sorted in.
 #[derive(PartialEq)]
 pub struct TableArrow {
     pub order_direction: OrderDirection,
@@ -81,92 +87,55 @@ impl Component for TableArrow {
     }
 }
 
-/// TableHead props (manual)
-#[derive(PartialEq, Default)]
-pub struct TableHead {
-    pub children: Vec<Element>,
-    key: DiffKey,
+/// Resolved theme and column layout a [Table] shares with its rows.
+#[derive(Clone, PartialEq)]
+pub struct TableConfig {
+    pub theme: TableTheme,
+    /// The table's own theme override, so a [TableRow] with a theme of its own can layer it on
+    /// top rather than on the global theme.
+    pub theme_override: Option<TableThemePartial>,
+    pub column_widths: Option<Vec<Size>>,
+    pub column_aligns: Option<Vec<Alignment>>,
 }
 
-impl TableHead {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
+/// The live [TableConfig] a [Table] shares with the [TableRow]s under it.
+///
+/// A [Readable] rather than a plain value, because a table's columns may change while its rows are
+/// mounted: `use_try_consume` runs once per component instance, so a row that read a plain context
+/// would keep the split it was born with. A row reading through this subscribes, and re-renders
+/// when the columns move.
+#[derive(Clone)]
+pub struct TableConfigContext(pub Readable<TableConfig>);
 
-impl ChildrenExt for TableHead {
-    fn get_children(&mut self) -> &mut Vec<Element> {
-        &mut self.children
-    }
-}
-
-impl KeyExt for TableHead {
-    fn write_key(&mut self) -> &mut DiffKey {
-        &mut self.key
-    }
-}
-
-impl Component for TableHead {
-    fn render(&self) -> impl IntoElement {
-        rect().width(Size::fill()).children(self.children.clone())
-    }
-
-    fn render_key(&self) -> DiffKey {
-        self.key.clone().or(self.default_key())
-    }
-}
-
-#[derive(PartialEq, Default)]
-pub struct TableBody {
-    pub children: Vec<Element>,
-    key: DiffKey,
-}
-
-impl TableBody {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-impl ChildrenExt for TableBody {
-    fn get_children(&mut self) -> &mut Vec<Element> {
-        &mut self.children
-    }
-}
-
-impl KeyExt for TableBody {
-    fn write_key(&mut self) -> &mut DiffKey {
-        &mut self.key
-    }
-}
-
-impl Component for TableBody {
-    fn render(&self) -> impl IntoElement {
-        rect().width(Size::fill()).children(self.children.clone())
-    }
-
-    fn render_key(&self) -> DiffKey {
-        self.key.clone().or(self.default_key())
-    }
-}
-
-#[derive(PartialEq, Clone, Copy)]
-enum TableRowState {
-    Idle,
-    Hovering,
-}
-
-#[derive(PartialEq, Default)]
+#[derive(PartialEq)]
 pub struct TableRow {
     pub theme: Option<TableThemePartial>,
-    /// optional press handler, called for a press anywhere in the row
+    /// Optional press handler, called for a press anywhere in the row.
     pub on_press: Option<EventHandler<Event<PressEventData>>>,
     pub children: Vec<Element>,
+    layout: LayoutData,
     key: DiffKey,
+}
+
+impl Default for TableRow {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TableRow {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            theme: None,
+            on_press: None,
+            children: vec![],
+            layout: Node {
+                width: Size::fill(),
+                ..Default::default()
+            }
+            .into(),
+            key: DiffKey::None,
+        }
     }
 
     /// Dress this row on its own, over the table's theme.
@@ -180,13 +149,20 @@ impl TableRow {
         self
     }
 
-    /// Handle a press anywhere in the row, rather than per [`TableCell`]. Use it for a table
-    /// whose rows are selectable.
+    /// Handle a press anywhere in the row. Use it for a table whose rows are selectable.
     pub fn on_press(mut self, handler: impl Into<EventHandler<Event<PressEventData>>>) -> Self {
         self.on_press = Some(handler.into());
         self
     }
 }
+
+impl LayoutExt for TableRow {
+    fn get_layout(&mut self) -> &mut LayoutData {
+        &mut self.layout
+    }
+}
+
+impl ContainerExt for TableRow {}
 
 impl ChildrenExt for TableRow {
     fn get_children(&mut self) -> &mut Vec<Element> {
@@ -202,159 +178,70 @@ impl KeyExt for TableRow {
 
 impl Component for TableRow {
     fn render(&self) -> impl IntoElement {
-        let theme = get_theme!(&self.theme, TableThemePreference, "table");
-        let column_widths = use_try_consume::<TableConfigContext>()
-            .and_then(|config| config.0.read().column_widths.clone());
-        let mut state = use_state(|| TableRowState::Idle);
-        let TableTheme {
-            divider_fill,
-            hover_row_background,
-            row_background,
-            ..
-        } = theme;
-        let background = if state() == TableRowState::Hovering {
-            hover_row_background
+        let config = use_try_consume::<TableConfigContext>().map(|config| config.0.read().clone());
+        let (column_widths, column_aligns) = config
+            .as_ref()
+            .map(|config| (config.column_widths.clone(), config.column_aligns.clone()))
+            .unwrap_or_default();
+        let theme = match (&self.theme, config) {
+            (None, Some(config)) => config.theme,
+            (row_theme, config) => {
+                let theme = get_theme_or_default();
+                let theme = theme.read();
+                let mut preference = theme
+                    .get::<TableThemePreference>("table")
+                    .cloned()
+                    .expect("Theme key not found: table");
+                if let Some(table_theme) = config.and_then(|config| config.theme_override) {
+                    preference.apply_optional(&table_theme);
+                }
+                if let Some(row_theme) = row_theme {
+                    preference.apply_optional(row_theme);
+                }
+                preference.resolve(&*theme.palette)
+            }
+        };
+        let mut hovering = use_state(|| false);
+        let background = if hovering() {
+            theme.hover_row_background
         } else {
-            row_background
+            theme.row_background
         };
 
         rect()
-            .on_pointer_enter(move |_| state.set(TableRowState::Hovering))
-            .on_pointer_leave(move |_| state.set(TableRowState::Idle))
+            .layout(self.layout.clone())
+            .horizontal()
+            .content(Content::Flex)
+            .cross_align(Alignment::Center)
+            .background(background)
+            .border(Border::new().fill(theme.divider_fill).width(BorderWidth {
+                bottom: 1.,
+                ..Default::default()
+            }))
+            .on_pointer_enter(move |_| hovering.set(true))
+            .on_pointer_leave(move |_| hovering.set(false))
             .map(self.on_press.clone(), |el, on_press| {
                 el.on_press(move |e| on_press.call(e))
             })
-            .background(background)
-            .child(
+            .children(self.children.iter().enumerate().map(|(index, child)| {
+                let width = column_widths
+                    .as_ref()
+                    .and_then(|widths| widths.get(index).cloned())
+                    .unwrap_or_else(|| Size::flex(1.));
+                let main_align = column_aligns
+                    .as_ref()
+                    .and_then(|aligns| aligns.get(index).cloned())
+                    .unwrap_or(Alignment::End);
+
                 rect()
-                    .width(Size::fill())
+                    .width(width)
+                    .overflow(Overflow::Clip)
+                    .padding(Gaps::new_all(5.0))
                     .horizontal()
-                    .content(Content::Flex)
-                    .children(self.children.iter().enumerate().map(|(index, child)| {
-                        let width = column_widths
-                            .as_ref()
-                            .and_then(|widths| widths.get(index).cloned())
-                            .unwrap_or_else(|| Size::flex(1.));
-
-                        rect().width(width).child(child.clone())
-                    })),
-            )
-            .child(
-                rect()
-                    .height(Size::px(1.))
-                    .width(Size::fill())
-                    .background(divider_fill),
-            )
-    }
-
-    fn render_key(&self) -> DiffKey {
-        self.key.clone().or(self.default_key())
-    }
-}
-
-#[derive(PartialEq)]
-pub struct TableCell {
-    pub children: Vec<Element>,
-    /// optional press handler
-    pub on_press: Option<EventHandler<Event<PressEventData>>>,
-    /// optional visual order direction
-    pub order_direction: Option<OrderDirection>,
-    /// padding as typed Gaps
-    pub padding: Gaps,
-    /// height as typed Size
-    pub height: Size,
-    /// where the cell's content sits along the row
-    pub main_align: Alignment,
-    key: DiffKey,
-}
-
-impl ChildrenExt for TableCell {
-    fn get_children(&mut self) -> &mut Vec<Element> {
-        &mut self.children
-    }
-}
-
-impl Default for TableCell {
-    fn default() -> Self {
-        Self {
-            children: vec![],
-            on_press: None,
-            order_direction: None,
-            padding: Gaps::new_all(5.0),
-            height: Size::px(35.0),
-            main_align: Alignment::End,
-            key: DiffKey::None,
-        }
-    }
-}
-
-impl TableCell {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn padding(mut self, padding: Gaps) -> Self {
-        self.padding = padding;
-        self
-    }
-
-    pub fn height(mut self, height: impl Into<Size>) -> Self {
-        self.height = height.into();
-        self
-    }
-
-    pub fn on_press(mut self, handler: impl Into<EventHandler<Event<PressEventData>>>) -> Self {
-        self.on_press = Some(handler.into());
-        self
-    }
-
-    pub fn order_direction(mut self, dir: Option<OrderDirection>) -> Self {
-        self.order_direction = dir;
-        self
-    }
-
-    /// Where the cell's content sits along the row. Defaults to [`Alignment::End`], which
-    /// suits the numeric columns a table is usually built from; text columns want
-    /// [`Alignment::Start`].
-    pub fn main_align(mut self, main_align: impl Into<Alignment>) -> Self {
-        self.main_align = main_align.into();
-        self
-    }
-}
-
-impl KeyExt for TableCell {
-    fn write_key(&mut self) -> &mut DiffKey {
-        &mut self.key
-    }
-}
-
-impl Component for TableCell {
-    fn render(&self) -> impl IntoElement {
-        let mut container = rect()
-            .overflow(Overflow::Clip)
-            .padding(self.padding)
-            .width(Size::fill())
-            .main_align(self.main_align.clone())
-            .cross_align(Alignment::Center)
-            .height(self.height.clone())
-            .horizontal();
-
-        if let Some(on_press) = &self.on_press {
-            let handler = on_press.clone();
-            container = container.on_press(move |e| handler.call(e));
-        }
-
-        if let Some(order_direction) = self.order_direction {
-            container = container.child(
-                rect()
-                    .margin(Gaps::new_all(10.0))
-                    .width(Size::px(10.0))
-                    .height(Size::px(10.0))
-                    .child(TableArrow::new(order_direction)),
-            );
-        }
-
-        container.children(self.children.clone())
+                    .main_align(main_align)
+                    .cross_align(Alignment::Center)
+                    .child(child.clone())
+            }))
     }
 
     fn render_key(&self) -> DiffKey {
@@ -370,75 +257,47 @@ impl Component for TableCell {
 /// # use freya::prelude::*;
 /// fn app() -> impl IntoElement {
 ///     Table::new()
-///         .child(
-///             TableHead::new().child(
-///                 TableRow::new()
-///                     .child(TableCell::new().child("Header 1"))
-///                     .child(TableCell::new().child("Header 2")),
-///             ),
-///         )
-///         .child(
-///             TableBody::new().child(
-///                 TableRow::new()
-///                     .child(TableCell::new().child("Data 1"))
-///                     .child(TableCell::new().child("Data 2")),
-///             ),
-///         )
-///         .child(
-///             TableBody::new().child(
-///                 TableRow::new()
-///                     .child(TableCell::new().child("Data 3"))
-///                     .child(TableCell::new().child("Data 4")),
-///             ),
-///         )
+///         .child(TableRow::new().child("Header 1").child("Header 2"))
+///         .child(TableRow::new().child("Data 1").child("Data 2"))
+///         .child(TableRow::new().child("Data 3").child("Data 4"))
 /// }
-/// # use freya_testing::prelude::*;
-/// # launch_doc(|| {
-/// #   rect().padding(8.).center().expanded().child(
-/// #       app()
-/// #   )
-/// # }, "./images/gallery_table.png")
-/// #   .with_hook(|t| { t.move_cursor((125., 125.)); t.sync_and_update(); })
-/// #   .with_scale_factor(0.9)
-/// #   .render();
 /// ```
 ///
-/// # Preview
-/// ![Table Preview][table]
-#[cfg_attr(feature = "docs",
-    doc = embed_doc_image::embed_image!("table", "images/gallery_table.png"),
-)]
+/// The table lays its children out with flex content, so a table standing at a given height
+/// can hand what is left of it to a child: a header row over a scrolling body wants the body
+/// at [`Size::flex`]. Inert for the default [`Size::Inner`], where no child asks for a share.
+///
+/// See the [interactive components demo](https://freyaui.dev/demo).
 #[derive(PartialEq)]
 pub struct Table {
-    pub height: Size,
     pub theme: Option<TableThemePartial>,
     pub column_widths: Option<Vec<Size>>,
+    pub column_aligns: Option<Vec<Alignment>>,
     pub children: Vec<Element>,
+    layout: LayoutData,
     key: DiffKey,
 }
 
 impl Default for Table {
     fn default() -> Self {
-        Self {
-            height: Size::Inner,
-            theme: None,
-            column_widths: None,
-            children: vec![],
-            key: DiffKey::None,
-        }
+        Self::new()
     }
 }
 
 impl Table {
     pub fn new() -> Self {
         Self {
-            ..Default::default()
+            theme: None,
+            column_widths: None,
+            column_aligns: None,
+            children: vec![],
+            layout: Node {
+                content: Content::Flex,
+                ..Default::default()
+            }
+            .into(),
+            key: DiffKey::None,
         }
-    }
-
-    pub fn height(mut self, height: impl Into<Size>) -> Self {
-        self.height = height.into();
-        self
     }
 
     pub fn theme(mut self, theme: TableThemePartial) -> Self {
@@ -451,6 +310,15 @@ impl Table {
     /// Accepts any [Size], defaults to [Size::Flex].
     pub fn column_widths(mut self, widths: impl Into<Vec<Size>>) -> Self {
         self.column_widths = Some(widths.into());
+        self
+    }
+
+    /// Set where each column's content sits along its row.
+    ///
+    /// Defaults to [`Alignment::End`], which suits the numeric columns a table is usually built
+    /// from; text columns want [`Alignment::Start`].
+    pub fn column_aligns(mut self, aligns: impl Into<Vec<Alignment>>) -> Self {
+        self.column_aligns = Some(aligns.into());
         self
     }
 }
@@ -467,45 +335,22 @@ impl KeyExt for Table {
     }
 }
 
-#[derive(Clone, Default, PartialEq)]
-pub struct TableConfig {
-    pub column_widths: Option<Vec<Size>>,
-}
-
-/// The live [TableConfig] a [Table] shares with the [TableRow]s under it.
-///
-/// A [Readable] rather than a plain value, because a table's columns may change while its rows are
-/// mounted: `use_try_consume` runs once per component instance, so a row that read a plain context
-/// would keep the split it was born with. A row reading through this subscribes, and re-renders
-/// when the columns move.
-#[derive(Clone)]
-pub struct TableConfigContext(pub Readable<TableConfig>);
-
-impl TableConfig {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_column_widths(column_widths: Vec<Size>) -> Self {
-        Self {
-            column_widths: Some(column_widths),
-        }
+impl LayoutExt for Table {
+    fn get_layout(&mut self) -> &mut LayoutData {
+        &mut self.layout
     }
 }
+
+impl ContainerExt for Table {}
 
 impl Component for Table {
     fn render(&self) -> impl IntoElement {
-        let TableTheme {
-            background,
-            corner_radius,
-            border_fill,
-            color,
-            ..
-        } = get_theme!(&self.theme, TableThemePreference, "table");
-
-        let config = match &self.column_widths {
-            Some(widths) => TableConfig::with_column_widths(widths.clone()),
-            None => TableConfig::default(),
+        let theme = get_theme!(&self.theme, TableThemePreference, "table");
+        let config = TableConfig {
+            theme: theme.clone(),
+            theme_override: self.theme.clone(),
+            column_widths: self.column_widths.clone(),
+            column_aligns: self.column_aligns.clone(),
         };
         let mut state = use_state(|| config.clone());
         if *state.peek() != config {
@@ -514,20 +359,15 @@ impl Component for Table {
         use_provide_context(|| TableConfigContext(state.into_readable()));
 
         rect()
+            .layout(self.layout.clone())
             .overflow(Overflow::Clip)
-            .color(color)
-            .background(background)
-            .corner_radius(corner_radius)
-            .height(self.height.clone())
-            // So a table standing at a given height can hand what is left of it to a child:
-            // a [`TableHead`] over a scrolling [`TableBody`] wants the body at `Size::flex`,
-            // and without flex content that height has nowhere to go. Inert for the default
-            // `Size::Inner`, where no child asks for a share.
-            .content(Content::Flex)
+            .color(theme.color)
+            .background(theme.background)
+            .corner_radius(theme.corner_radius)
             .border(
                 Border::new()
                     .alignment(BorderAlignment::Outer)
-                    .fill(border_fill)
+                    .fill(theme.border_fill)
                     .width(1.0),
             )
             .children(self.children.clone())
@@ -545,8 +385,6 @@ mod tests {
 
     use crate::table::{
         Table,
-        TableBody,
-        TableCell,
         TableRow,
     };
 
@@ -565,16 +403,11 @@ mod tests {
         fn app() -> impl IntoElement {
             let widths = consume_context::<State<Option<Vec<Size>>>>();
             Table::new()
+                .width(Size::fill())
                 .map(widths.read().clone(), |table, widths| {
                     table.column_widths(widths)
                 })
-                .child(
-                    TableBody::new().child(
-                        TableRow::new()
-                            .child(TableCell::new().child("a"))
-                            .child(TableCell::new().child("b")),
-                    ),
-                )
+                .child(TableRow::new().child("a").child("b"))
         }
 
         let (mut runner, widths) = TestingRunner::new(
@@ -598,6 +431,8 @@ mod tests {
                 .next()
                 .expect("a laid-out cell")
         }
+
+        assert_eq!(first_cell(&runner), 200., "two flex columns share the row");
 
         let mut widths = widths;
         widths.set(Some(vec![Size::px(120.), Size::flex(1.)]));

@@ -6,13 +6,10 @@ use std::{
 };
 
 use freya_clipboard::clipboard::Clipboard;
-use freya_core::{
-    elements::paragraph::{
-        ParagraphCursorExt,
-        ParagraphHolder,
-        ParagraphHolderInner,
-    },
-    prelude::PressEventType,
+use freya_core::elements::paragraph::{
+    ParagraphCursorExt,
+    ParagraphHolder,
+    ParagraphHolderInner,
 };
 use keyboard_types::{
     Key,
@@ -27,7 +24,6 @@ use crate::{
         EditBindings,
     },
     editor_history::EditorHistory,
-    event::TextDragging,
 };
 
 #[derive(PartialEq, Clone, Debug, Copy, Hash)]
@@ -499,99 +495,19 @@ pub trait TextEditor {
         0
     }
 
-    /// The UTF-16 bounds of the line holding `pos`, terminator **included**: selecting
-    /// this and removing it removes the line, which is what a triple press means.
-    fn line_span(&self, pos: usize) -> Range<usize> {
-        let line_idx = self.char_to_line(self.utf16_cu_to_char(pos));
-        let start = self.char_to_utf16_cu(self.line_to_char(line_idx));
-        start..start + self.line(line_idx).map_or(0, |line| line.utf16_len())
-    }
-
-    /// [`Self::line_span`] with the line terminator left **outside**: where the caret
-    /// stops, and how far a delete-to-line-end reaches. Neither may cross into the next
-    /// line, so these are two answers rather than one.
+    /// [`Self::find_line_boundaries`] with the line terminator left **outside**: where the
+    /// caret stops, and how far a delete-to-line-end reaches. Neither may cross into the next
+    /// line, while a triple press selects the terminator too, so these are two answers rather
+    /// than one.
     fn line_bounds(&self, pos: usize) -> Range<usize> {
-        let span = self.line_span(pos);
+        let (start, end) = self.find_line_boundaries(pos);
+        let span = start..end;
         let Some(line) = self.line(self.char_to_line(self.utf16_cu_to_char(pos))) else {
             return span;
         };
         let text = line.text.as_ref();
         let body = text.trim_end_matches(LINE_BREAKS);
         span.start..span.end - text[body.len()..].encode_utf16().count()
-    }
-
-    /// The selection one press makes: the caret for a single press, then the word, the
-    /// line, and the whole text. `at` is the position under the pointer and `current`
-    /// the selection the press starts from, already widened to a range when Shift is
-    /// held.
-    fn press_selection(
-        &self,
-        at: usize,
-        press: PressEventType,
-        current: TextSelection,
-    ) -> TextSelection {
-        match press {
-            PressEventType::Single => current,
-            PressEventType::Double => TextSelection::new_range(self.find_word_boundaries(at)),
-            PressEventType::Triple => {
-                let span = self.line_span(at);
-                TextSelection::new_range((span.start, span.end))
-            }
-            PressEventType::Quadruple => TextSelection::new_range((0, self.len_utf16_cu())),
-        }
-    }
-
-    /// The selection a drag makes: it extends from the range the press established by
-    /// the **unit that press used**, so a drag after a double press moves word by word.
-    ///
-    /// Extending by character instead is what undoes a double press: no real double
-    /// click is perfectly still, and the first pointer sample inside the word the press
-    /// selected would drag the active end back to it, leaving the word start to the
-    /// pointer selected.
-    fn drag_selection(
-        &self,
-        pointer: usize,
-        dragging: &TextDragging,
-        current: TextSelection,
-    ) -> TextSelection {
-        let (anchor_start, anchor_end) = dragging.anchor;
-        match dragging.press {
-            PressEventType::Single => {
-                let mut selection = current;
-                selection.move_to(pointer);
-                return selection;
-            }
-            PressEventType::Quadruple => {
-                return TextSelection::new_range((0, self.len_utf16_cu()));
-            }
-            _ => {}
-        }
-
-        // Still inside what the press selected, so that is the answer: a drag has to
-        // leave the pressed unit before it extends anything. This is the whole fix for
-        // a twitching double click, and it covers the pointer resting exactly on the
-        // pressed word's edge, where the glyph under it is already the next one.
-        if (anchor_start..=anchor_end).contains(&pointer) {
-            return TextSelection::new_range((anchor_start, anchor_end));
-        }
-
-        let (edge_before, edge_after) = match dragging.press {
-            PressEventType::Triple => {
-                let span = self.line_span(pointer);
-                (span.start, span.end)
-            }
-            _ => match self.find_word_boundaries(pointer) {
-                // Whitespace belongs to no word, so there the pointer is its own edge.
-                (from, to) if from == to => (pointer, pointer),
-                bounds => bounds,
-            },
-        };
-
-        if pointer < anchor_start {
-            TextSelection::new_range((anchor_end, edge_before))
-        } else {
-            TextSelection::new_range((anchor_start, edge_after))
-        }
     }
 
     /// The position `granularity` away from `pos` in the given direction.
@@ -1059,6 +975,14 @@ pub trait TextEditor {
     fn get_selection_range(&self) -> Option<(usize, usize)>;
 
     fn get_indentation(&self) -> u8;
+
+    /// Find the UTF-16 boundaries of the logical line containing a position.
+    fn find_line_boundaries(&self, position: usize) -> (usize, usize) {
+        let line_index = self.char_to_line(self.utf16_cu_to_char(position));
+        let start = self.char_to_utf16_cu(self.line_to_char(line_index));
+        let length = self.line(line_index).map_or(0, |line| line.utf16_len());
+        (start, start + length)
+    }
 
     fn find_word_boundaries(&self, pos: usize) -> (usize, usize) {
         let pos_char = self.utf16_cu_to_char(pos);

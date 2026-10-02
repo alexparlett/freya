@@ -1,6 +1,12 @@
+use std::time::Instant;
+
 use freya_core::prelude::*;
 use torin::{
-    geometry::Point2D,
+    geometry::{
+        Point2D,
+        Size2D,
+        Vector2D,
+    },
     prelude::{
         Area,
         Direction,
@@ -17,6 +23,16 @@ pub enum ScrollPosition {
     End,
 }
 
+impl ScrollPosition {
+    /// Scroll offset in pixels of this position.
+    fn offset(&self) -> i32 {
+        match self {
+            Self::Start => 0,
+            Self::End => ScrollController::END,
+        }
+    }
+}
+
 /// Initial configuration for a [`ScrollController`] created with [`use_scroll_controller`].
 #[derive(Default)]
 pub struct ScrollConfig {
@@ -26,49 +42,26 @@ pub struct ScrollConfig {
     pub default_horizontal_position: ScrollPosition,
 }
 
-/// A pending request to scroll an axis to a given [`ScrollPosition`], consumed on the next layout.
-pub struct ScrollRequest {
-    pub(crate) position: ScrollPosition,
-    pub(crate) direction: Direction,
-    pub(crate) init: bool,
-}
-
-impl ScrollRequest {
-    /// Creates a request to scroll `direction` to `position`.
-    pub fn new(position: ScrollPosition, direction: Direction) -> ScrollRequest {
-        ScrollRequest {
-            position,
-            direction,
-            init: false,
-        }
-    }
-}
-
-/// An absolute scroll movement along one axis, in pixels.
-pub enum ScrollEvent {
-    X(i32),
-    Y(i32),
-}
-
-/// Handle to drive and read a scrollable area programmatically.
+/// Handle to drive a scrollview programmatically.
 ///
-/// By default a scrollable owns its scroll position and only the user can move it, through the
+/// By default a scrollview owns its scroll position and only the user can move it, through the
 /// wheel, the scrollbar, arrow keys or dragging. A [`ScrollController`] lets your own code read and
 /// change that position instead. Create one with [`use_scroll_controller`] and hand it to a
-/// scrollable through its `new_controlled` constructor.
+/// scrollview through its `new_controlled` constructor.
 ///
 /// Some cases where a controller is needed:
 ///
 /// - Jumping to the top or bottom in response to an action, for example scrolling a chat to the
 ///   newest message after sending one.
-/// - Keeping several scrollables in sync, like a diff view with two panes that move together.
+/// - Keeping several scrollviews in sync, like a diff view with two panes that move together.
 /// - Reading the current scroll position to drive something else, such as a "scroll to top" button
 ///   that only appears once the user has scrolled down.
 ///
 /// # Scrolling from code
 ///
-/// [`scroll_to`](ScrollController::scroll_to) queues a jump to the start or end of an axis, applied
-/// on the next layout. This is the common way to snap a list to its top or bottom.
+/// [`scroll_to`](ScrollController::scroll_to) jumps to the start or end of an axis, with the end
+/// resolved against the content on the next layout. This is the common way to snap a list to its
+/// top or bottom.
 ///
 /// ```rust
 /// # use freya::prelude::*;
@@ -94,10 +87,10 @@ pub enum ScrollEvent {
 /// [`scroll_to_x`](ScrollController::scroll_to_x). The current position is available by converting
 /// the controller into a `(i32, i32)` tuple of `(x, y)` pixels.
 ///
-/// # Keeping scrollables in sync
+/// # Keeping scrollviews in sync
 ///
-/// Because a [`ScrollController`] is a cheap [`Copy`] handle, pass the same one to several
-/// scrollables and they share a single scroll position: moving any of them moves the rest.
+/// Because a [`ScrollController`] is a cheap [`Copy`] handle, you can pass the same one to several
+/// scrollviews and they share a single scroll position, moving any of them moves the rest.
 ///
 /// ```rust
 /// # use freya::prelude::*;
@@ -140,141 +133,52 @@ pub enum ScrollEvent {
 /// ```
 #[derive(PartialEq, Clone, Copy)]
 pub struct ScrollController {
-    notifier: State<()>,
-    requests: State<Vec<ScrollRequest>>,
-    on_scroll: State<Callback<ScrollEvent, bool>>,
-    get_scroll: State<Callback<(), (i32, i32)>>,
-    /// The scrollable's current viewport rectangle (window space), refreshed by the scrollable each
-    /// layout via [`set_viewport`](Self::set_viewport). Lets [`scroll_to_item`](Self::scroll_to_item)
-    /// reveal a target from its own measured rectangle without the caller knowing the viewport.
+    pub(crate) scroll: State<(i32, i32)>,
+    bounds: State<Option<(Size2D, Size2D)>>,
+    /// The scrollable's viewport rectangle in window space, refreshed on every layout. Lets
+    /// [`scroll_to_item`](Self::scroll_to_item) reveal a target from its own measured rectangle
+    /// without the caller knowing the viewport.
     viewport: State<Area>,
-    /// The current scroll position, mirroring [`on_scroll`](Self::on_scroll)/[`get_scroll`](Self::get_scroll).
-    /// Held here so [`scroll_to_item`](Self::scroll_to_item) can *peek* it: that method is imperative,
-    /// so reading via `get_scroll` inside a reactive effect would subscribe the effect to the scroll
-    /// and loop it against its own write.
-    scroll: State<(i32, i32)>,
-    /// The scrollable's last content (inner) size `(width, height)`, refreshed every layout by the
-    /// scrollable via [`use_apply`](Self::use_apply). Paired with [`viewport`](Self::viewport) it
-    /// answers [`is_scrollable`](Self::is_scrollable), so a consumer holding the controller can gate
-    /// UI on whether the area actually overflows, without measuring it a second time.
-    inner: State<(f32, f32)>,
-    /// Whether [`scroll`](Self::scroll) has to be refreshed from [`get_scroll`](Self::get_scroll),
-    /// which is true only of a [`managed`](Self::managed) controller: the one [`new`](Self::new)
-    /// builds reads its own mirror, so refreshing it would compare a value with itself.
-    mirrored: bool,
+    pub(crate) damp: State<SmoothDamp>,
+    pub(crate) drag: State<Drag>,
+    pub(crate) task: State<Option<TaskHandle>>,
 }
 
 impl From<ScrollController> for (i32, i32) {
     /// Reads the current `(x, y)` scroll position in pixels.
     fn from(val: ScrollController) -> Self {
-        val.get_scroll.read().call(())
+        *val.scroll.read()
     }
 }
 
 impl ScrollController {
-    /// Creates a controller starting at scroll position `(x, y)` with a list of requests to apply.
-    pub fn new(x: i32, y: i32, initial_requests: Vec<ScrollRequest>) -> Self {
-        let mut scroll = State::create((x, y));
+    /// Offset of an axis scrolled to its end, resolved against the content size on the next layout.
+    const END: i32 = i32::MIN;
+
+    /// Creates a controller starting at the scroll position `(x, y)`.
+    pub fn new(x: i32, y: i32) -> Self {
         Self {
-            notifier: State::create(()),
-            requests: State::create(initial_requests),
-            on_scroll: State::create(Callback::new(move |ev| {
-                // Peek, not read: this callback runs from `scroll_to_x`/`scroll_to_item`, which can be
-                // driven inside a reactive effect. Reading here would subscribe that effect to the
-                // scroll and loop it against this very write. Consumers subscribe via `get_scroll`.
-                let current = *scroll.peek();
-                match ev {
-                    ScrollEvent::X(x) => {
-                        scroll.write().0 = x;
-                    }
-                    ScrollEvent::Y(y) => {
-                        scroll.write().1 = y;
-                    }
-                }
-                current != *scroll.peek()
-            })),
-            get_scroll: State::create(Callback::new(move |_| *scroll.read())),
+            scroll: State::create((x, y)),
+            bounds: State::create(None),
             viewport: State::create(Area::default()),
-            scroll,
-            inner: State::create((0., 0.)),
-            mirrored: false,
-        }
-    }
-    /// Builds a controller from externally owned state, letting the caller manage its storage.
-    pub fn managed(
-        notifier: State<()>,
-        requests: State<Vec<ScrollRequest>>,
-        on_scroll: State<Callback<ScrollEvent, bool>>,
-        get_scroll: State<Callback<(), (i32, i32)>>,
-    ) -> Self {
-        Self {
-            notifier,
-            requests,
-            on_scroll,
-            get_scroll,
-            viewport: State::create(Area::default()),
-            scroll: State::create((0, 0)),
-            inner: State::create((0., 0.)),
-            mirrored: true,
+            damp: State::create(SmoothDamp::new()),
+            drag: State::create(Drag::default()),
+            task: State::create(None),
         }
     }
 
-    /// Applies any pending requests against the given content size. Called by the scrollable on every layout.
-    pub fn use_apply(&mut self, width: f32, height: f32) {
-        let _ = self.notifier.read();
-        if self.mirrored {
-            self.scroll.set_if_modified(self.get_scroll.read().call(()));
-        }
-        // Retain the content size so `is_scrollable` can compare it against the viewport. Guarded
-        // so an unchanged layout doesn't notify overflow subscribers.
-        self.inner.set_if_modified((width, height));
-        for request in self.requests.write().drain(..) {
-            match request {
-                ScrollRequest {
-                    position: ScrollPosition::Start,
-                    direction: Direction::Vertical,
-                    ..
-                } => {
-                    self.on_scroll.write().call(ScrollEvent::Y(0));
-                }
-                ScrollRequest {
-                    position: ScrollPosition::Start,
-                    direction: Direction::Horizontal,
-                    ..
-                } => {
-                    self.on_scroll.write().call(ScrollEvent::X(0));
-                }
-                ScrollRequest {
-                    position: ScrollPosition::End,
-                    direction: Direction::Vertical,
-                    init,
-                    ..
-                } => {
-                    if init && height == 0. {
-                        continue;
-                    }
-                    let (_x, y) = self.get_scroll.read().call(());
-                    self.on_scroll
-                        .write()
-                        .call(ScrollEvent::Y(y - height as i32));
-                }
-                ScrollRequest {
-                    position: ScrollPosition::End,
-                    direction: Direction::Horizontal,
-                    init,
-                    ..
-                } => {
-                    if init && width == 0. {
-                        continue;
-                    }
+    /// Updates the content and viewport bounds used to clamp scroll positions.
+    ///
+    /// `viewport` is the scrollable's visible frame in window space: the content box is sized to
+    /// the viewport, and its own offset scrolls its children rather than itself.
+    pub(crate) fn apply_layout(&mut self, content_size: Size2D, viewport: Area) {
+        self.bounds
+            .set_if_modified(Some((content_size, viewport.size)));
+        self.viewport.set_if_modified(viewport);
 
-                    let (x, _y) = self.get_scroll.read().call(());
-                    self.on_scroll
-                        .write()
-                        .call(ScrollEvent::X(x - width as i32));
-                }
-            }
-        }
+        let (x, y) = *self.scroll.peek();
+        self.scroll_to_x(x);
+        self.scroll_to_y(y);
     }
 
     pub(crate) fn position(self) -> Point2D {
@@ -284,44 +188,63 @@ impl ScrollController {
 
     /// Scrolls the horizontal axis to `to` pixels. Returns whether the position actually changed.
     pub fn scroll_to_x(&mut self, to: i32) -> bool {
-        self.on_scroll.write().call(ScrollEvent::X(to))
+        let to = self.bounded_position(to, Direction::Horizontal);
+        let changed = self.scroll.peek().0 != to;
+        if changed {
+            self.scroll.write().0 = to;
+        }
+        changed
     }
 
     /// Scrolls the vertical axis to `to` pixels. Returns whether the position actually changed.
     pub fn scroll_to_y(&mut self, to: i32) -> bool {
-        self.on_scroll.write().call(ScrollEvent::Y(to))
+        let to = self.bounded_position(to, Direction::Vertical);
+        let changed = self.scroll.peek().1 != to;
+        if changed {
+            self.scroll.write().1 = to;
+        }
+        changed
     }
 
-    /// Queues a scroll of `scroll_direction` to `scroll_position`, applied on the next layout.
+    fn bounded_position(&self, position: i32, direction: Direction) -> i32 {
+        let Some((content_size, viewport_size)) = *self.bounds.read() else {
+            return position;
+        };
+
+        let (content_size, viewport_size) = match direction {
+            Direction::Horizontal => (content_size.width, viewport_size.width),
+            Direction::Vertical => (content_size.height, viewport_size.height),
+        };
+        get_corrected_scroll_position(content_size, viewport_size, position as f32) as i32
+    }
+
+    /// Scrolls `scroll_direction` to `scroll_position`.
     pub fn scroll_to(&mut self, scroll_position: ScrollPosition, scroll_direction: Direction) {
-        self.requests
-            .write()
-            .push(ScrollRequest::new(scroll_position, scroll_direction));
-        self.notifier.write();
+        let to = scroll_position.offset();
+        match scroll_direction {
+            Direction::Vertical => self.scroll_to_y(to),
+            Direction::Horizontal => self.scroll_to_x(to),
+        };
     }
 
-    /// Records the scrollable's current viewport rectangle (window space). The scrollable calls this
-    /// every layout so [`scroll_to_item`](Self::scroll_to_item) can reveal a target against it.
-    pub fn set_viewport(&mut self, viewport: Area) {
-        self.viewport.set_if_modified(viewport);
+    /// The content and viewport extents along `direction`, as last laid out.
+    fn extents(bounds: Option<(Size2D, Size2D)>, direction: Direction) -> (f32, f32) {
+        let Some((content_size, viewport_size)) = bounds else {
+            return (0., 0.);
+        };
+        match direction {
+            Direction::Horizontal => (content_size.width, viewport_size.width),
+            Direction::Vertical => (content_size.height, viewport_size.height),
+        }
     }
 
     /// Whether the scrollable overflows its viewport along `direction`, i.e. there is content to
-    /// scroll to on that axis. Reads the content size and viewport the scrollable last reported
-    /// (via [`use_apply`](Self::use_apply) / [`set_viewport`](Self::set_viewport)) and subscribes
-    /// the caller, so a sibling can reactively show or hide a scroll affordance as the area's
-    /// content grows and shrinks. Unmeasured (zero-viewport) reads as not scrollable.
+    /// scroll to on that axis. Reads the content size and viewport the scrollable last laid out
+    /// and subscribes the caller, so a sibling can reactively show or hide a scroll affordance as
+    /// the area's content grows and shrinks. Unmeasured (zero-viewport) reads as not scrollable.
     pub fn is_scrollable(&self, direction: Direction) -> bool {
-        let (inner_width, inner_height) = *self.inner.read();
-        let viewport = *self.viewport.read();
-        match direction {
-            Direction::Horizontal => {
-                crate::scrollviews::shared::is_scrollable(inner_width, viewport.width())
-            }
-            Direction::Vertical => {
-                crate::scrollviews::shared::is_scrollable(inner_height, viewport.height())
-            }
-        }
+        let (content, viewport) = Self::extents(*self.bounds.read(), direction);
+        crate::scrollviews::shared::is_scrollable(content, viewport)
     }
 
     /// Whether `direction` is scrolled to its end, within a pixel.
@@ -342,32 +265,30 @@ impl ScrollController {
     /// Content that does not overflow is **at** its end: there is nowhere else to be, and a
     /// follower gated on this must keep following as the first lines arrive.
     pub fn is_at_end(&self, direction: Direction) -> bool {
-        let (inner_width, inner_height) = *self.inner.peek();
-        let viewport = *self.viewport.peek();
-        let (position, inner, shown) = match direction {
-            Direction::Horizontal => (self.scroll.peek().0, inner_width, viewport.width()),
-            Direction::Vertical => (self.scroll.peek().1, inner_height, viewport.height()),
-        };
-        if !crate::scrollviews::shared::is_scrollable(inner, shown) {
+        let (content, viewport) = Self::extents(*self.bounds.peek(), direction);
+        if !crate::scrollviews::shared::is_scrollable(content, viewport) {
             return true;
         }
+        let (x, y) = *self.scroll.peek();
+        let position = match direction {
+            Direction::Horizontal => x,
+            Direction::Vertical => y,
+        };
+        let position = get_corrected_scroll_position(content, viewport, position as f32);
         // The scroll position is negative-going: the content is offset up by how far down the
         // reader is, so the end is where that offset covers everything the viewport does not.
-        (position.unsigned_abs() as f32 + shown) >= inner - 1.0
+        (position.abs() + viewport) >= content - 1.0
     }
 
     /// Scrolls the minimum amount needed to bring `item` fully into view, on whichever axes it
-    /// overflows the viewport. The position is clamped against the content extent first, because the
-    /// views correct it only for what they paint: the stored position can sit outside the range the
-    /// content actually has, and revealing against it would answer for a viewport that is not on
-    /// screen. `item` is the target's own measured window-space rectangle, e.g.
+    /// overflows the viewport. `item` is the target's own measured window-space rectangle, e.g.
     /// straight from an [`on_sized`](freya_core::prelude::EventHandlersExt::on_sized)
     /// [`Area`](torin::prelude::Area), so the caller never has to know the viewport or scroll
     /// position. A no-op once the item is already visible, so it is safe to call every render (an
     /// item larger than the viewport aligns to its start and stops, rather than oscillating).
     ///
     /// Peeks rather than reads: it is imperative, and reading inside a reactive effect would
-    /// subscribe that effect to the viewport and loop it against the `on_scroll` write.
+    /// subscribe that effect to the viewport and loop it against its own scroll write.
     pub fn scroll_to_item(&mut self, item: impl Into<Area>) {
         let item = item.into();
         let viewport = *self.viewport.peek();
@@ -391,14 +312,10 @@ impl ScrollController {
         );
 
         if dx != 0.0 {
-            self.on_scroll
-                .write()
-                .call(ScrollEvent::X((x as f32 + dx).round() as i32));
+            self.scroll_to_x((x as f32 + dx).round() as i32);
         }
         if dy != 0.0 {
-            self.on_scroll
-                .write()
-                .call(ScrollEvent::Y((y as f32 + dy).round() as i32));
+            self.scroll_to_y((y as f32 + dy).round() as i32);
         }
     }
 
@@ -419,32 +336,31 @@ impl ScrollController {
     /// first layout there is no viewport and no content extent to reveal against, and the call does
     /// nothing. Reveal from a gesture, or from an effect that runs once the target could have been
     /// drawn. A caller that must move the view on the frame it mounts wants
-    /// [`scroll_to`](Self::scroll_to), whose request is queued and applied at the next layout.
+    /// [`scroll_to`](Self::scroll_to), which is resolved against the content on the next layout.
     ///
-    /// The content spans `0..inner` along the axis and the position is negative-going, so the
+    /// The content spans `0..content` along the axis and the position is negative-going, so the
     /// visible span of the content starts at `-position`. Everything is peeked rather than read,
     /// for [`scroll_to_item`](Self::scroll_to_item)'s reason.
     pub fn scroll_to_offset(&mut self, offset: f32, size: f32, direction: Direction) {
-        let viewport = *self.viewport.peek();
-        let (x, y) = *self.scroll.peek();
-        let (inner_width, inner_height) = *self.inner.peek();
-        let (position, shown, inner) = match direction {
-            Direction::Horizontal => (x as f32, viewport.width(), inner_width),
-            Direction::Vertical => (y as f32, viewport.height(), inner_height),
-        };
-        if shown <= 0.0 || inner <= 0.0 {
+        let (content, viewport) = Self::extents(*self.bounds.peek(), direction);
+        if viewport <= 0.0 || content <= 0.0 {
             return;
         }
-        let position = get_corrected_scroll_position(inner, shown, position);
-        let delta = reveal_delta(offset, offset + size, -position, -position + shown);
+        let (x, y) = *self.scroll.peek();
+        let position = match direction {
+            Direction::Horizontal => x,
+            Direction::Vertical => y,
+        };
+        let position = get_corrected_scroll_position(content, viewport, position as f32);
+        let delta = reveal_delta(offset, offset + size, -position, -position + viewport);
         if delta == 0.0 {
             return;
         }
         let to = (position + delta).round() as i32;
-        self.on_scroll.write().call(match direction {
-            Direction::Horizontal => ScrollEvent::X(to),
-            Direction::Vertical => ScrollEvent::Y(to),
-        });
+        match direction {
+            Direction::Horizontal => self.scroll_to_x(to),
+            Direction::Vertical => self.scroll_to_y(to),
+        };
     }
 }
 
@@ -466,26 +382,227 @@ fn reveal_delta(item_min: f32, item_max: f32, vp_min: f32, vp_max: f32) -> f32 {
     }
 }
 
-/// Creates a [`ScrollController`] tied to the component, configured by the returned [`ScrollConfig`].
-pub fn use_scroll_controller(init: impl FnOnce() -> ScrollConfig) -> ScrollController {
+/// Creates a [`ScrollController`], configured by the returned [`ScrollConfig`].
+pub fn use_scroll_controller(config: impl FnOnce() -> ScrollConfig) -> ScrollController {
     use_hook(|| {
-        let config = init();
+        let config = config();
 
         ScrollController::new(
-            0,
-            0,
-            vec![
-                ScrollRequest {
-                    position: config.default_vertical_position,
-                    direction: Direction::Vertical,
-                    init: true,
-                },
-                ScrollRequest {
-                    position: config.default_horizontal_position,
-                    direction: Direction::Horizontal,
-                    init: true,
-                },
-            ],
+            config.default_horizontal_position.offset(),
+            config.default_vertical_position.offset(),
         )
     })
+}
+
+/// Distance under which the animation is close enough to snap, in pixels.
+const SETTLE_DISTANCE: f32 = 0.5;
+/// Speed under which the animation is slow enough to stop, in pixels per second.
+const SETTLE_SPEED: f32 = 20.0;
+
+/// Slowest drag release speed that still starts a fling, in pixels per second.
+const FLING_MIN_SPEED: f32 = 50.0;
+
+/// Scrolling feel of a [`TargetPlatform`].
+pub(crate) trait ScrollFeel {
+    /// Seconds wheel and keyboard scrolls take to reach their destination.
+    fn scroll_smoothing_time(&self) -> f32;
+    /// Seconds a fling takes to stop, which also scales how far it travels.
+    fn scroll_fling_time(&self) -> f32;
+}
+
+impl ScrollFeel for TargetPlatform {
+    fn scroll_smoothing_time(&self) -> f32 {
+        if self.is_mobile() { 0.1 } else { 0.06 }
+    }
+
+    fn scroll_fling_time(&self) -> f32 {
+        if self.is_mobile() { 0.35 } else { 0.5 }
+    }
+}
+
+/// Moves a value towards a target with a smooth and continuous animation.
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SmoothDamp {
+    position: Point2D,
+    velocity: Vector2D,
+    smooth_time: f32,
+}
+
+impl SmoothDamp {
+    pub(crate) fn new() -> Self {
+        Self {
+            position: Point2D::zero(),
+            velocity: Vector2D::zero(),
+            smooth_time: TargetPlatform::Unknown.scroll_smoothing_time(),
+        }
+    }
+
+    /// Returns whether it has settled onto `target`.
+    fn advance(&mut self, target: Point2D, elapsed_seconds: f32) -> bool {
+        let omega = 2.0 / self.smooth_time;
+        let decay = (-omega * elapsed_seconds).exp();
+        let change = self.position - target;
+        let linear_term = (self.velocity + change * omega) * elapsed_seconds;
+
+        let velocity = (self.velocity - linear_term * omega) * decay;
+        let position = target + (change + linear_term) * decay;
+
+        if (target - position).length() < SETTLE_DISTANCE && velocity.length() < SETTLE_SPEED {
+            self.position = target;
+            self.velocity = Vector2D::zero();
+            return true;
+        }
+
+        self.position = position;
+        self.velocity = velocity;
+        false
+    }
+}
+
+/// Velocity tracked while the content is dragged, to fling with on release.
+#[derive(Clone, Copy)]
+pub(crate) struct Drag {
+    velocity: Vector2D,
+    last_move: Instant,
+}
+
+impl Default for Drag {
+    fn default() -> Self {
+        Self {
+            velocity: Vector2D::zero(),
+            last_move: Instant::now(),
+        }
+    }
+}
+
+impl Drag {
+    fn track(&mut self, delta: Vector2D) {
+        let now = Instant::now();
+        let elapsed_seconds = now.duration_since(self.last_move).as_secs_f32();
+        if elapsed_seconds > 0.0 {
+            self.velocity = self.velocity.lerp(-delta / elapsed_seconds, 0.5);
+        }
+        self.last_move = now;
+    }
+}
+
+/// Follows the target held by a [`ScrollController`].
+impl ScrollController {
+    /// Position to render, the animated one while a scroll animation is running.
+    pub fn animated_position(&self, target: Point2D) -> Point2D {
+        if self.task.read().is_some() {
+            self.damp.read().position
+        } else {
+            target
+        }
+    }
+
+    /// Chases the controller position from `current`, keeping the current velocity.
+    pub fn animate_from(&mut self, current: Point2D) {
+        self.start(current, None, TargetPlatform::get().scroll_smoothing_time());
+    }
+
+    /// Like [`Self::animate_from`] but launched at `velocity` and slower to stop.
+    fn fling_from(&mut self, current: Point2D, velocity: Vector2D) {
+        self.start(
+            current,
+            Some(velocity),
+            TargetPlatform::get().scroll_fling_time(),
+        );
+    }
+
+    fn start(&mut self, current: Point2D, velocity: Option<Vector2D>, smooth_time: f32) {
+        let is_animating = self.task.read().is_some();
+        {
+            let mut damp = self.damp.write();
+            damp.smooth_time = smooth_time;
+            if let Some(velocity) = velocity {
+                damp.velocity = velocity;
+            }
+            if !is_animating {
+                damp.position = current;
+            }
+        }
+        if is_animating {
+            return;
+        }
+
+        let ticker = RenderingTicker::get();
+        let platform = Platform::get();
+        let animation_clock = AnimationClock::get();
+        let scroll_controller = *self;
+        let mut damp = self.damp;
+        let mut task = self.task;
+
+        let animation_task = spawn(async move {
+            platform.send(UserEvent::RequestRedraw);
+            let mut previous_frame = Instant::now();
+
+            loop {
+                ticker.tick().await;
+
+                let elapsed_seconds = animation_clock
+                    .correct_elapsed_duration(previous_frame.elapsed())
+                    .as_secs_f32();
+                previous_frame = Instant::now();
+
+                let target = scroll_controller.position();
+                if damp.write().advance(target, elapsed_seconds) {
+                    break;
+                }
+
+                platform.send(UserEvent::RequestRedraw);
+            }
+
+            task.write().take();
+        });
+        task.write().replace(animation_task);
+    }
+
+    /// Freezes the animation and starts a drag from the momentum it caught.
+    pub fn begin_drag(&mut self) {
+        let caught_velocity = self.stop();
+        self.drag.set(Drag {
+            velocity: caught_velocity,
+            last_move: Instant::now(),
+        });
+    }
+
+    /// Feeds a drag movement into the tracked velocity.
+    pub fn drag(&mut self, delta: Vector2D) {
+        self.stop();
+        self.drag.write().track(delta);
+    }
+
+    /// Ends a drag, flinging when it was fast enough to be a flick.
+    pub fn release_drag(&mut self, from: Point2D, content: Size2D, viewport: Size2D) {
+        let velocity = self.drag.peek().velocity;
+        if velocity.length() < FLING_MIN_SPEED {
+            return;
+        }
+
+        let projected = from + velocity * TargetPlatform::get().scroll_fling_time();
+        let target_x = get_corrected_scroll_position(content.width, viewport.width, projected.x);
+        let target_y = get_corrected_scroll_position(content.height, viewport.height, projected.y);
+
+        self.fling_from(from, velocity);
+        self.scroll_to_x(target_x as i32);
+        self.scroll_to_y(target_y as i32);
+    }
+
+    /// Freezes the scroll where it is, returning the velocity it was moving at.
+    pub fn stop(&mut self) -> Vector2D {
+        let task = self.task.write().take();
+        if let Some(task) = task {
+            task.cancel();
+
+            let position = self.damp.peek().position.to_i32();
+            self.scroll_to_x(position.x);
+            self.scroll_to_y(position.y);
+        }
+
+        let velocity = self.damp.peek().velocity;
+        self.damp.write().velocity = Vector2D::zero();
+        velocity
+    }
 }

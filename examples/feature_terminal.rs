@@ -82,12 +82,12 @@ fn app() -> impl IntoElement {
                                     Some(MouseButton::Right) => TerminalMouseButton::Right,
                                     _ => TerminalMouseButton::Left,
                                 };
-                                let selection_type = match EventsCombos::pressed(e.element_location)
-                                {
-                                    PressEventType::Double => SelectionType::Semantic,
-                                    PressEventType::Triple => SelectionType::Lines,
-                                    _ => SelectionType::Simple,
-                                };
+                                let selection_type =
+                                    match EventsCombos::<()>::pressed(e.element_location) {
+                                        PressEventType::Double => SelectionType::Semantic,
+                                        PressEventType::Triple => SelectionType::Lines,
+                                        _ => SelectionType::Simple,
+                                    };
                                 handle.mouse_down(row, col, button, selection_type);
                             }
                         })
@@ -122,7 +122,7 @@ fn app() -> impl IntoElement {
                                 }
                             }
                         })
-                        .on_global_pointer_press({
+                        .on_global_pointer_up({
                             let handle = handle.clone();
                             move |_: Event<PointerEventData>| {
                                 handle.release();

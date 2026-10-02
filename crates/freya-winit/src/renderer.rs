@@ -6,13 +6,19 @@ use std::{
     time::Instant,
 };
 
+#[cfg(feature = "accessibility")]
 use accesskit_winit::WindowEvent as AccessibilityWindowEvent;
-use freya_core::integration::*;
+use freya_components::cache::AssetCacher;
+use freya_core::{
+    integration::*,
+    metrics::Metrics,
+};
 use freya_engine::prelude::{
     FontCollection,
     FontMgr,
     SkData,
     TypefaceFontProvider,
+    register_font_typeface,
 };
 use futures_lite::future::FutureExt as _;
 use futures_util::{
@@ -29,12 +35,13 @@ use torin::prelude::{
 };
 #[cfg(all(feature = "tray", not(target_os = "linux")))]
 use tray_icon::TrayIcon;
+#[cfg(feature = "accessibility")]
+use winit::dpi::{
+    LogicalPosition,
+    LogicalSize,
+};
 use winit::{
     application::ApplicationHandler,
-    dpi::{
-        LogicalPosition,
-        LogicalSize,
-    },
     event::{
         ElementState,
         Ime,
@@ -53,14 +60,18 @@ use winit::{
     },
 };
 
+#[cfg(feature = "accessibility")]
+use crate::integration::is_ime_role;
 use crate::{
     accessibility::AccessibilityTask,
     config::{
         CloseDecision,
         WindowConfig,
     },
-    drivers::GraphicsDriver,
-    integration::is_ime_role,
+    drivers::{
+        GraphicsContext,
+        GraphicsDriver,
+    },
     plugins::{
         PluginEvent,
         PluginHandle,
@@ -105,6 +116,7 @@ pub struct WinitRenderer {
     pub waker: Waker,
     pub exit_on_close: bool,
     pub gpu_resource_cache_limit: usize,
+    pub graphics_context: GraphicsContext,
 }
 
 pub struct RendererContext<'a> {
@@ -117,6 +129,7 @@ pub struct RendererContext<'a> {
     pub font_collection: &'a mut FontCollection,
     pub active_event_loop: &'a ActiveEventLoop,
     pub gpu_resource_cache_limit: usize,
+    pub graphics_context: &'a mut GraphicsContext,
 }
 
 impl RendererContext<'_> {
@@ -130,6 +143,7 @@ impl RendererContext<'_> {
             self.font_manager,
             self.fallback_fonts,
             self.gpu_resource_cache_limit,
+            self.graphics_context,
             self.global_contexts,
         );
 
@@ -254,6 +268,7 @@ impl NativeEventExt for RendererContext<'_> {
 pub enum NativeWindowEventAction {
     PollRunner,
 
+    #[cfg(feature = "accessibility")]
     Accessibility(AccessibilityWindowEvent),
 
     PlatformEvent(PlatformEvent),
@@ -361,6 +376,7 @@ pub enum NativeEvent {
     Preferences(mundy::Preferences),
 }
 
+#[cfg(feature = "accessibility")]
 impl From<accesskit_winit::Event> for NativeEvent {
     fn from(event: accesskit_winit::Event) -> Self {
         NativeEvent::Window(NativeWindowEvent {
@@ -397,6 +413,7 @@ impl WinitRenderer {
                 font_manager: &mut self.font_manager,
                 font_collection: &mut self.font_collection,
                 gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                graphics_context: &mut self.graphics_context,
             };
             on_close(renderer_context, window_id)
         } else {
@@ -479,6 +496,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     &self.font_manager,
                     &self.fallback_fonts,
                     self.gpu_resource_cache_limit,
+                    &mut self.graphics_context,
                     &self.global_contexts,
                 );
 
@@ -508,6 +526,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     app_window.window_attributes.clone(),
                     self.gpu_resource_cache_limit,
                     app_window.renderer,
+                    &mut self.graphics_context,
                 );
 
                 let new_id = new_window.id();
@@ -545,6 +564,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     font_manager: &mut self.font_manager,
                     font_collection: &mut self.font_collection,
                     gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                    graphics_context: &mut self.graphics_context,
                 };
                 (cb)(&mut renderer_context);
             }
@@ -572,6 +592,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     font_manager: &mut self.font_manager,
                     font_collection: &mut self.font_collection,
                     gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                    graphics_context: &mut self.graphics_context,
                 };
                 match action {
                     NativeTrayEventAction::TrayEvent(icon_event) => {
@@ -600,6 +621,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                             &self.font_manager,
                             &self.fallback_fonts,
                             self.gpu_resource_cache_limit,
+                            &mut self.graphics_context,
                             &self.global_contexts,
                         );
 
@@ -630,6 +652,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                         font_manager: &mut self.font_manager,
                         font_collection: &mut self.font_collection,
                         gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                        graphics_context: &mut self.graphics_context,
                     };
                     (tray_handler)(
                         crate::tray::TrayEvent::Menu(menu_event.clone()),
@@ -647,6 +670,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                         font_manager: &mut self.font_manager,
                         font_collection: &mut self.font_collection,
                         gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                        graphics_context: &mut self.graphics_context,
                     };
                     (menu_handler)(menu_event, renderer_context);
                 }
@@ -667,8 +691,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     return;
                 };
 
-                self.font_provider
-                    .register_typeface(typeface, Some(font_name.as_ref()));
+                register_font_typeface(&mut self.font_provider, font_name.as_ref(), typeface);
                 self.font_collection.clear_caches();
 
                 for app in self.windows.values_mut() {
@@ -801,14 +824,17 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                         }
                         // Intercepted before the per-window borrow above.
                         NativeWindowEventAction::RequestClose => {}
+                        #[cfg(feature = "accessibility")]
                         NativeWindowEventAction::Accessibility(
                             accesskit_winit::WindowEvent::AccessibilityDeactivated,
                         ) => {
                             app.screen_reader.set(false);
                         }
+                        #[cfg(feature = "accessibility")]
                         NativeWindowEventAction::Accessibility(
                             accesskit_winit::WindowEvent::ActionRequested(_),
                         ) => {}
+                        #[cfg(feature = "accessibility")]
                         NativeWindowEventAction::Accessibility(
                             accesskit_winit::WindowEvent::InitialTreeRequested,
                         ) => {
@@ -837,7 +863,9 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                 app.window.request_redraw();
                             }
                             UserEvent::OpenUrl(url) => {
-                                let _ = open::that(url);
+                                if let Err(error) = open::that(&url) {
+                                    tracing::error!(%error, %url, "Failed to open URL");
+                                }
                             }
                             UserEvent::SetCustomScaleFactor(custom_scale_factor) => {
                                 app.set_custom_scale_factor(custom_scale_factor);
@@ -862,6 +890,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                             &self.font_manager,
                                             &self.fallback_fonts,
                                             self.gpu_resource_cache_limit,
+                                            &mut self.graphics_context,
                                             &self.global_contexts,
                                         );
 
@@ -918,6 +947,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                             font_manager: &mut self.font_manager,
                                             font_collection: &mut self.font_collection,
                                             gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                                            graphics_context: &mut self.graphics_context,
                                         };
                                         (cb)(window_id, &mut renderer_context);
                                     }
@@ -945,6 +975,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
     ) {
         let mut needs_recovery = false;
         if let Some(app) = &mut self.windows.get_mut(&window_id) {
+            #[cfg(feature = "accessibility")]
             app.accessibility_adapter.process_event(&app.window, &event);
             match event {
                 WindowEvent::ThemeChanged(theme) => {
@@ -1032,7 +1063,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                             );
 
                             if std::mem::take(&mut app.send_mouse_move_on_next_layout)
-                                && app.position != CursorPoint::from((-1., -1.))
+                                && app.cursor_in_window
                             {
                                 app.process_platform_events(
                                     vec![PlatformEvent::Mouse {
@@ -1046,6 +1077,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                             }
                         }
 
+                        let resource_cache = app.driver.resource_cache_usage();
                         let present_result = app.driver.present(
                             app.window.inner_size().cast(),
                             &app.window,
@@ -1071,6 +1103,18 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
 
                                 render_pipeline.render();
 
+                                let cached_assets = app.runner.with_root_context(|| {
+                                    AssetCacher::try_get()
+                                        .map(|asset_cacher| asset_cacher.cached_size())
+                                        .unwrap_or_default()
+                                });
+                                let metrics = Metrics::new(
+                                    &app.runner,
+                                    &app.tree,
+                                    cached_assets,
+                                    resource_cache,
+                                );
+
                                 self.plugins.send(
                                     PluginEvent::AfterRender {
                                         window: &app.window,
@@ -1078,6 +1122,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                         font_collection: &self.font_collection,
                                         tree: &app.tree,
                                         animation_clock: &app.animation_clock,
+                                        metrics,
                                     },
                                     PluginHandle::new(&self.proxy),
                                 );
@@ -1125,6 +1170,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                             AccessibilityTask::ProcessUpdate { mode } => {
                                 app.process_accessibility_update(mode);
                             }
+                            #[cfg(feature = "accessibility")]
                             AccessibilityTask::Init => {
                                 let title = app.window.title();
                                 let update = app.accessibility.init(&mut app.tree, &title);
@@ -1150,8 +1196,11 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                     LogicalSize::new(area.width(), area.height()),
                                 );
 
-                                app.screen_reader.set(true);
-                                app.accessibility_adapter.update_if_active(|| update);
+                                #[cfg(feature = "accessibility")]
+                                {
+                                    app.screen_reader.set(true);
+                                    app.accessibility_adapter.update_if_active(|| update);
+                                }
                             }
                             AccessibilityTask::None => {}
                         }
@@ -1331,12 +1380,10 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     if std::mem::replace(&mut app.mouse_state, ElementState::Released)
                         == ElementState::Released
                     {
-                        app.position = CursorPoint::from((-1., -1.));
+                        app.cursor_in_window = false;
                         app.process_platform_events(
-                            vec![PlatformEvent::Mouse {
-                                name: MouseEventName::MouseMove,
+                            vec![PlatformEvent::PointerExit {
                                 cursor: app.position,
-                                button: None,
                             }],
                             &mut self.plugins,
                             PluginHandle::new(&self.proxy),
@@ -1345,6 +1392,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                 }
                 WindowEvent::CursorMoved { position, .. } => {
                     app.position = CursorPoint::from((position.x, position.y));
+                    app.cursor_in_window = true;
 
                     let mut platform_events = vec![PlatformEvent::Mouse {
                         name: MouseEventName::MouseMove,

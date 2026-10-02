@@ -277,6 +277,29 @@ pub fn is_scrollbar_visible(
 
 const MIN_SCROLLBAR_SIZE: f32 = 50.0;
 
+pub const SCROLLBAR_MARGIN: f32 = 3.0;
+
+/// Thumb size, scrollable content range and thumb travel range inside the track.
+fn get_thumb_ranges(inner_size: f32, viewport_size: f32) -> (f32, f32, f32) {
+    let track_size = viewport_size - SCROLLBAR_MARGIN * 2.0;
+    let viewable_ratio = viewport_size / inner_size;
+    let minimum_thumb_size = if track_size > MIN_SCROLLBAR_SIZE {
+        MIN_SCROLLBAR_SIZE
+    } else {
+        0.
+    };
+    let scrollbar_size = (track_size * viewable_ratio).max(minimum_thumb_size);
+
+    let available_scroll_range = inner_size - viewport_size;
+    let available_thumb_range = track_size - scrollbar_size;
+
+    (
+        scrollbar_size,
+        available_scroll_range,
+        available_thumb_range,
+    )
+}
+
 #[doc(hidden)]
 pub fn get_scrollbar_pos_and_size(
     inner_size: f32,
@@ -287,11 +310,8 @@ pub fn get_scrollbar_pos_and_size(
         return (0.0, 0.0);
     }
 
-    let viewable_ratio = viewport_size / inner_size;
-    let scrollbar_size = (viewport_size * viewable_ratio).max(MIN_SCROLLBAR_SIZE);
-
-    let available_scroll_range = inner_size - viewport_size;
-    let available_thumb_range = viewport_size - scrollbar_size;
+    let (scrollbar_size, available_scroll_range, available_thumb_range) =
+        get_thumb_ranges(inner_size, viewport_size);
 
     let normalized_scroll = -scroll_position / available_scroll_range;
     let scrollbar_position = normalized_scroll * available_thumb_range;
@@ -308,14 +328,11 @@ pub fn get_scroll_position_from_cursor(
         return 0;
     }
 
-    let viewable_ratio = viewport_size / inner_size;
-    let scrollbar_size = (viewport_size * viewable_ratio).max(MIN_SCROLLBAR_SIZE);
-
-    let available_scroll_range = inner_size - viewport_size;
-    let available_thumb_range = viewport_size - scrollbar_size;
+    let (_, available_scroll_range, available_thumb_range) =
+        get_thumb_ranges(inner_size, viewport_size);
 
     // Clamp cursor position
-    let cursor_clamped = cursor_position.clamp(0.0, available_thumb_range);
+    let cursor_clamped = (cursor_position - SCROLLBAR_MARGIN).clamp(0.0, available_thumb_range);
 
     let normalized_scroll = cursor_clamped / available_thumb_range;
     let new_position = -(normalized_scroll * available_scroll_range);
@@ -387,12 +404,15 @@ mod tests {
     use freya_core::prelude::WheelGranularity;
 
     use crate::scrollviews::shared::{
+        SCROLLBAR_MARGIN,
         WHEEL_ACCELERATION_FAST,
         WHEEL_ACCELERATION_MAX,
         WHEEL_ACCELERATION_SLOW,
         WHEEL_GESTURE_WINDOW,
         WheelGestureClock,
         accelerate_wheel_delta,
+        get_scroll_position_from_cursor,
+        get_scrollbar_pos_and_size,
         is_scrollable,
         wheel_acceleration,
     };
@@ -544,5 +564,22 @@ mod tests {
         assert!(!is_scrollable(80., 100.));
         // An unmeasured (zero) viewport reads as not-yet-scrollable, even with content.
         assert!(!is_scrollable(200., 0.));
+    }
+
+    #[test]
+    fn scrollbar_can_drag_when_the_track_is_smaller_than_the_minimum_thumb() {
+        for viewport_size in 51..=56 {
+            let viewport_size = viewport_size as f32;
+            let inner_size = viewport_size * 2.;
+            let track_size = viewport_size - SCROLLBAR_MARGIN * 2.;
+
+            let (_, thumb_size) = get_scrollbar_pos_and_size(inner_size, viewport_size, 0.);
+
+            assert!(thumb_size < track_size);
+            assert_eq!(
+                get_scroll_position_from_cursor(viewport_size, inner_size, viewport_size),
+                -viewport_size as i32
+            );
+        }
     }
 }

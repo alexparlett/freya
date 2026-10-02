@@ -30,11 +30,14 @@ use freya_engine::prelude::{
 };
 use torin::prelude::{
     Area,
+    CursorPoint,
+    Gaps,
     Length,
     Point2D,
     Position,
     PostMeasure,
     Size2D,
+    SizeModel,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -67,6 +70,7 @@ use crate::{
         Color,
         ContainerExt,
         ContainerPositionExt,
+        EffectExt,
         EventHandlersExt,
         KeyExt,
         LayerExt,
@@ -103,6 +107,7 @@ pub fn paragraph() -> Paragraph {
 pub struct ParagraphHolderInner {
     pub paragraph: Rc<SkParagraph>,
     pub scale_factor: f64,
+    pub padding: Gaps,
 }
 
 /// A shared slot that receives the laid-out paragraph, so callers can hit-test and measure
@@ -125,6 +130,20 @@ impl Debug for ParagraphHolder {
 impl Default for ParagraphHolder {
     fn default() -> Self {
         Self(Rc::new(RefCell::new(None)))
+    }
+}
+
+impl ParagraphHolder {
+    pub fn visible_location(&self, location: CursorPoint) -> CursorPoint {
+        let holder_data = self.0.borrow();
+        let Some(holder) = holder_data.as_ref() else {
+            return location;
+        };
+
+        CursorPoint::new(
+            location.x - f64::from(holder.padding.left()) / holder.scale_factor,
+            location.y - f64::from(holder.padding.top()) / holder.scale_factor,
+        )
     }
 }
 
@@ -154,6 +173,7 @@ pub struct ParagraphElement {
     pub cursor_mode: CursorMode,
     pub vertical_align: VerticalAlign,
     pub letter_spacing: Option<f32>,
+    pub effect: Option<EffectData>,
 }
 
 impl Default for ParagraphElement {
@@ -178,6 +198,7 @@ impl Default for ParagraphElement {
             cursor_mode: CursorMode::default(),
             vertical_align: VerticalAlign::default(),
             letter_spacing: Default::default(),
+            effect: None,
         }
     }
 }
@@ -226,6 +247,10 @@ impl ElementExt for ParagraphElement {
             diff.insert(DiffModifies::LAYER);
         }
 
+        if self.effect != paragraph.effect {
+            diff.insert(DiffModifies::EFFECT);
+        }
+
         if self.text_style_data != paragraph.text_style_data {
             diff.insert(DiffModifies::STYLE);
         }
@@ -265,7 +290,7 @@ impl ElementExt for ParagraphElement {
         Cow::Borrowed(&self.layout)
     }
     fn effect(&'_ self) -> Option<Cow<'_, EffectData>> {
-        None
+        self.effect.as_ref().map(Cow::Borrowed)
     }
 
     fn style(&'_ self) -> Cow<'_, StyleState> {
@@ -298,13 +323,15 @@ impl ElementExt for ParagraphElement {
     }
 
     fn measure(&self, context: LayoutContext) -> Option<(Size2D, Rc<dyn Any>)> {
+        let content_area_size =
+            (*context.area_size - context.torin_node.padding.into()).max(Size2D::zero());
         let cached_paragraph = CachedParagraph {
             text_style_state: context.text_style_state,
             spans: &self.spans,
             max_lines: self.max_lines,
             line_height: self.line_height,
             letter_spacing: self.letter_spacing,
-            width: context.area_size.width,
+            width: content_area_size.width,
         };
         let paragraph = context
             .text_cache
@@ -320,7 +347,7 @@ impl ElementExt for ParagraphElement {
                 {
                     f32::MAX
                 } else {
-                    context.area_size.width + 1.0
+                    content_area_size.width + 1.0
                 };
 
                 let paragraph = self.build_paragraph(
@@ -336,7 +363,9 @@ impl ElementExt for ParagraphElement {
                     .insert(context.node_id, &cached_paragraph, paragraph)
             });
 
-        let size = Size2D::new(paragraph.longest_line(), paragraph.height()).max(Size2D::zero());
+        let size = Size2D::new(paragraph.longest_line(), paragraph.height())
+            .max(Size2D::zero())
+            .with_gaps(&context.torin_node.padding);
 
         self.sk_paragraph
             .0
@@ -344,6 +373,7 @@ impl ElementExt for ParagraphElement {
             .replace(ParagraphHolderInner {
                 paragraph,
                 scale_factor: context.scale_factor,
+                padding: context.torin_node.padding,
             });
 
         Some((size, Rc::new(())))
@@ -405,14 +435,15 @@ impl ElementExt for ParagraphElement {
             .replace(ParagraphHolderInner {
                 paragraph: Rc::new(paragraph),
                 scale_factor: context.scale_factor,
+                padding: self.layout.layout.padding,
             });
 
-        let visible_area = context.node_layout.visible_area();
+        let inner_area = context.node_layout.inner_area;
         let vertical_offset = match self.vertical_align {
             VerticalAlign::Start => 0.0,
-            VerticalAlign::Center => (visible_area.height() - paragraph_height).max(0.0) / 2.0,
+            VerticalAlign::Center => (inner_area.height() - paragraph_height).max(0.0) / 2.0,
         };
-        let origin = visible_area.origin;
+        let origin = inner_area.origin;
 
         let mut offsets = Vec::new();
         let mut hidden_children = Vec::new();
@@ -445,15 +476,15 @@ impl ElementExt for ParagraphElement {
     fn render(&self, context: RenderContext) {
         let paragraph = self.sk_paragraph.0.borrow();
         let ParagraphHolderInner { paragraph, .. } = paragraph.as_ref().unwrap();
-        let visible_area = context.layout_node.visible_area();
+        let inner_area = context.layout_node.inner_area;
 
         let cursor_area = match self.cursor_mode {
-            CursorMode::Fit => visible_area,
+            CursorMode::Fit => inner_area.cast_unit(),
             CursorMode::Expanded => context.layout_node.area,
         };
 
         let paragraph_height = paragraph.height();
-        let area_height = visible_area.height();
+        let area_height = inner_area.height();
         let vertical_offset = match self.vertical_align {
             VerticalAlign::Start => 0.0,
             VerticalAlign::Center => (area_height - paragraph_height).max(0.0) / 2.0,
@@ -540,7 +571,7 @@ impl ElementExt for ParagraphElement {
         // Draw text
         paragraph.paint_at(
             context.canvas,
-            Point2D::new(visible_area.min_x(), visible_area.min_y() + vertical_offset),
+            Point2D::new(inner_area.min_x(), inner_area.min_y() + vertical_offset).cast_unit(),
         );
 
         // Draw cursor
@@ -856,7 +887,7 @@ impl Span<'_> {
         let span_style = TextStyleState::from_data(text_style_state, &self.text_style_data);
         let mut text_style = TextStyle::new();
 
-        let mut font_families = text_style_state.font_families.clone();
+        let mut font_families = span_style.font_families.clone();
         font_families.extend_from_slice(fallback_fonts);
 
         span_style
@@ -910,14 +941,20 @@ impl ParagraphPaintExt for SkParagraph {
     }
 
     fn fill_area(&self) -> Area {
-        let max_width = self.max_width();
-        let width = if max_width < f32::MAX {
-            max_width
-        } else {
-            self.longest_line()
-        };
+        let (left, right) = self
+            .get_line_metrics()
+            .into_iter()
+            .filter(|line| line.width > 0.0)
+            .map(|line| (line.left as f32, (line.left + line.width) as f32))
+            .reduce(|(left, right), (line_left, line_right)| {
+                (left.min(line_left), right.max(line_right))
+            })
+            .unwrap_or((0.0, self.longest_line()));
 
-        Area::new(Point2D::zero(), Size2D::new(width, self.height()))
+        Area::new(
+            Point2D::new(left, 0.0),
+            Size2D::new(right - left, self.height()),
+        )
     }
 }
 
@@ -992,6 +1029,12 @@ impl AccessibilityExt for Paragraph {
 impl TextStyleExt for Paragraph {
     fn get_text_style_data(&mut self) -> &mut TextStyleData {
         &mut self.element.text_style_data
+    }
+}
+
+impl EffectExt for Paragraph {
+    fn get_effect(&mut self) -> &mut EffectData {
+        self.element.effect.get_or_insert_with(EffectData::default)
     }
 }
 

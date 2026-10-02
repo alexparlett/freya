@@ -9,7 +9,10 @@ use torin::{
 use crate::{
     define_theme,
     get_theme,
-    icons::arrow::ArrowIcon,
+    icons::{
+        IconThemePartialExt,
+        arrow::ArrowIcon,
+    },
     scrollviews::{
         ScrollController,
         VirtualItem,

@@ -205,6 +205,9 @@ pub trait WinitPlatformExt {
         F: FnOnce(&mut SkiaSurface) -> T + 'static;
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct WindowDragGesture;
+
 /// Makes a [`Rect`] behave like a native title bar.
 pub trait WindowDragExt {
     /// Drag the window by pressing the element and moving; double-press it to **fill** the
@@ -222,20 +225,22 @@ impl WindowDragExt for Rect {
             if e.button() != Some(MouseButton::Left) {
                 return;
             }
-            if EventsCombos::pressed(e.global_location()).is_double() {
+            if EventsCombos::<WindowDragGesture>::pressed(e.global_location()).is_double() {
                 Platform::get().with_window(None, |window| {
                     window.set_maximized(!window.is_maximized());
                 });
             }
         })
         .on_global_pointer_move(|e: Event<PointerEventData>| {
-            if EventsCombos::moved(e.global_location()) {
+            if EventsCombos::<WindowDragGesture>::moved(e.global_location()) {
                 Platform::get().with_window(None, |window| {
                     let _ = window.drag_window();
                 });
             }
         })
-        .on_global_pointer_press(|_: Event<PointerEventData>| EventsCombos::released())
+        .on_global_pointer_up(|_: Event<PointerEventData>| {
+            EventsCombos::<WindowDragGesture>::released();
+        })
     }
 }
 
