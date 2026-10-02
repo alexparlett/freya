@@ -321,7 +321,11 @@ where
     /// ask, since it is designed to outlive the component that started it and may come back to a
     /// subtree that is gone. Cancelling the task on unmount is the usual answer; this is the one
     /// for work that must finish regardless and only needs to know whether there is anybody left
-    /// to notify.
+    /// to notify. For a plain [`State`](freya_core::prelude::State),
+    /// [`try_write`](freya_core::prelude::State::try_write) answers the same question.
+    ///
+    /// A station whose value is borrowed right now also reads as not alive, so ask outside any
+    /// read or write of it.
     ///
     /// ```rust, ignore
     /// # use freya::prelude::*;
@@ -334,7 +338,7 @@ where
     /// });
     /// ```
     pub fn is_alive(&self) -> bool {
-        self.value.is_alive()
+        self.value.try_peek().is_some()
     }
 }
 

@@ -111,6 +111,9 @@ pub struct Tree {
     pub accessibility_groups: AccessibilityGroups,
     pub accessibility_diff: AccessibilityDirtyNodes,
     pub accessibility_generator: AccessibilityGenerator,
+    /// Nodes marked [modal](crate::prelude::AccessibilityExt::a11y_modal), kept up to date as
+    /// they mount, change and unmount so finding the active modal never walks the whole tree.
+    pub modal_nodes: FxHashSet<NodeId>,
 }
 
 impl Tree {
@@ -223,38 +226,59 @@ impl Tree {
             return Ordering::Equal;
         }
 
-        let chain_to_root = |mut node: NodeId| {
-            let mut chain = vec![node];
-            while let Some(parent) = self.parents.get(&node) {
-                chain.push(*parent);
-                node = *parent;
+        // Walks up without allocating: this runs inside a sort comparator, once per pair of
+        // same-name global events.
+        let parent = |node: NodeId| self.parents.get(&node).copied();
+        let depth = |mut node: NodeId| {
+            let mut depth = 0usize;
+            while let Some(up) = parent(node) {
+                depth += 1;
+                node = up;
             }
-            chain.reverse(); // root .. node
-            chain
+            depth
         };
 
-        let chain_a = chain_to_root(a);
-        let chain_b = chain_to_root(b);
-        if chain_a[0] != chain_b[0] {
-            return Ordering::Equal;
+        // Lift the deeper node to the other's depth. Arriving at the other node means it is an
+        // ancestor, and an ancestor comes first.
+        let (mut node_a, mut node_b) = (a, b);
+        let (mut depth_a, mut depth_b) = (depth(a), depth(b));
+        while depth_a > depth_b {
+            let Some(up) = parent(node_a) else {
+                return Ordering::Equal;
+            };
+            node_a = up;
+            depth_a -= 1;
+        }
+        while depth_b > depth_a {
+            let Some(up) = parent(node_b) else {
+                return Ordering::Equal;
+            };
+            node_b = up;
+            depth_b -= 1;
+        }
+        if node_a == b {
+            return Ordering::Greater;
+        }
+        if node_b == a {
+            return Ordering::Less;
         }
 
-        // Walk down from the shared root to the first divergence. The chains cannot be
-        // identical (a != b), so one side always diverges or runs out first.
-        let mut depth = 1;
-        while depth < chain_a.len() && chain_a.get(depth) == chain_b.get(depth) {
-            depth += 1;
-        }
-        match (chain_a.get(depth), chain_b.get(depth)) {
-            // One chain ran out: that node is an ancestor of the other, so it comes first.
-            (None, _) => Ordering::Less,
-            (_, None) => Ordering::Greater,
-            (Some(child_a), Some(child_b)) => {
-                let Some(children) = self.children.get(&chain_a[depth - 1]) else {
-                    return Ordering::Equal;
-                };
-                let index_of = |child: &NodeId| children.iter().position(|c| c == child);
-                index_of(child_a).cmp(&index_of(child_b))
+        // Climb together until the two are siblings, then their child index decides.
+        loop {
+            match (parent(node_a), parent(node_b)) {
+                (Some(parent_a), Some(parent_b)) if parent_a == parent_b => {
+                    let Some(children) = self.children.get(&parent_a) else {
+                        return Ordering::Equal;
+                    };
+                    let index_of = |child: NodeId| children.iter().position(|c| *c == child);
+                    return index_of(node_a).cmp(&index_of(node_b));
+                }
+                (Some(parent_a), Some(parent_b)) => {
+                    node_a = parent_a;
+                    node_b = parent_b;
+                }
+                // No common root.
+                _ => return Ordering::Equal,
             }
         }
     }
@@ -342,6 +366,7 @@ impl Tree {
                     layer_state.remove(node_id, &mut self.layers);
 
                     // Remove from the accessibility
+                    self.modal_nodes.remove(&node_id);
                     let accessibility_state = self.accessibility_state.remove(&node_id).unwrap();
                     accessibility_state.remove(
                         node_id,
@@ -521,6 +546,11 @@ impl Tree {
                                 ),
                             );
                         }
+                    }
+                    if element.accessibility().builder.is_modal() {
+                        self.modal_nodes.insert(node_id);
+                    } else {
+                        self.modal_nodes.remove(&node_id);
                     }
                 }
 

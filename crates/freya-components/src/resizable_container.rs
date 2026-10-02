@@ -520,6 +520,7 @@ impl Component for ResizableContainer {
         use_provide_context(|| size);
 
         let direction = use_reactive(&self.layout.direction);
+        let handle_size = use_reactive(&self.handle_size);
         let mut registry = use_provide_context(|| {
             self.controller.clone().unwrap_or_else(|| {
                 let mut state = State::create(ResizableContext {
@@ -535,6 +536,13 @@ impl Component for ResizableContainer {
                     }
                 });
 
+                Effect::create_sync_with_gen(move |current_gen| {
+                    let handle_size = handle_size();
+                    if current_gen > 0 {
+                        state.write().handle_size = handle_size;
+                    }
+                });
+
                 state.into_writable()
             })
         });
@@ -543,11 +551,28 @@ impl Component for ResizableContainer {
         // asked for, so shrinking squeezes them instead of letting them overflow, and growing
         // back restores them. Guarded on an actual change: `reflow` is a no-op at rest, and
         // writing regardless would wake every panel on each layout pass.
+        //
+        // What the panels and handles share is the container less its padding and the spacing
+        // between its children (every panel and every handle), so that is what is published to
+        // the handles and reflowed against.
+        let padding = self.layout.layout.padding;
+        let spacing =
+            self.layout.layout.spacing.get() * (self.panels.len() * 2).saturating_sub(2) as f32;
         let on_sized = move |e: Event<SizedEventData>| {
-            size.set(e.area);
-            let axis = match registry.peek().direction {
-                Direction::Horizontal => e.area.width(),
-                Direction::Vertical => e.area.height(),
+            let direction = registry.peek().direction;
+            let mut area = e.area;
+            area.origin.x += padding.left();
+            area.origin.y += padding.top();
+            area.size.width = (area.size.width - padding.horizontal()).max(0.);
+            area.size.height = (area.size.height - padding.vertical()).max(0.);
+            match direction {
+                Direction::Horizontal => area.size.width = (area.size.width - spacing).max(0.),
+                Direction::Vertical => area.size.height = (area.size.height - spacing).max(0.),
+            }
+            size.set(area);
+            let axis = match direction {
+                Direction::Horizontal => area.width(),
+                Direction::Vertical => area.height(),
             };
             registry.write_if(|mut registry| registry.reflow(axis));
         };

@@ -549,7 +549,7 @@ impl TestingRunner {
     /// Scrolls by a delta in pixels, as a precise device such as a trackpad reports it. These are
     /// taken at face value, so the distance asked for is the distance scrolled.
     pub fn scroll(&mut self, cursor: impl Into<CursorPoint>, scroll: impl Into<CursorPoint>) {
-        self.scroll_wheel(cursor, scroll, WheelGranularity::Pixel, Instant::now());
+        self.scroll_wheel(cursor, scroll, WheelSource::Pixel, Instant::now());
     }
 
     /// Scrolls by a number of lines, as a mouse wheel reports it. Wheel acceleration applies, so
@@ -570,8 +570,8 @@ impl TestingRunner {
         let lines = lines.into();
         self.scroll_wheel(
             cursor,
-            lines * WheelGranularity::LINE_SIZE,
-            WheelGranularity::Line,
+            lines * WheelSource::LINE_SIZE,
+            WheelSource::Line,
             timestamp,
         );
     }
@@ -580,7 +580,7 @@ impl TestingRunner {
         &mut self,
         cursor: impl Into<CursorPoint>,
         scroll: impl Into<CursorPoint>,
-        granularity: WheelGranularity,
+        source: WheelSource,
         timestamp: Instant,
     ) {
         let cursor = cursor.into();
@@ -589,8 +589,7 @@ impl TestingRunner {
             name: WheelEventName::Wheel,
             scroll,
             cursor,
-            source: WheelSource::Device,
-            granularity,
+            source,
             timestamp,
         });
         self.sync_and_update();

@@ -108,10 +108,6 @@ impl Component for TitlebarButton {
             }
         };
 
-        let icon = SvgViewer::new(icon_svg.as_bytes())
-            .width(Size::px(12.))
-            .height(Size::px(12.));
-
         // Close is the destructive action, so it carries its own hovered pair; the other three
         // share the ordinary one.
         let destructive = matches!(self.action, TitlebarAction::Close);
@@ -120,6 +116,13 @@ impl Component for TitlebarButton {
             (true, false) => (theme.hover_background, theme.color),
             (false, _) => (theme.background, theme.color),
         };
+
+        // The glyph is given its colour rather than inheriting it: an inherited `currentColor`
+        // is only known once the icon is laid out, so the first frame would draw it black.
+        let icon = SvgViewer::new(icon_svg.as_bytes())
+            .width(Size::px(12.))
+            .height(Size::px(12.))
+            .color(color);
 
         rect()
             .width(theme.width)

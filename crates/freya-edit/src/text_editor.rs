@@ -6,10 +6,14 @@ use std::{
 };
 
 use freya_clipboard::clipboard::Clipboard;
-use freya_core::elements::paragraph::{
-    ParagraphCursorExt,
-    ParagraphHolder,
-    ParagraphHolderInner,
+use freya_core::{
+    elements::paragraph::{
+        ParagraphCursorExt,
+        ParagraphHolder,
+        ParagraphHolderInner,
+    },
+    events::modifiers::ModifiersExt,
+    prelude::TargetPlatform,
 };
 use keyboard_types::{
     Key,
@@ -101,12 +105,6 @@ impl TextSelection {
     }
 }
 
-/// The characters [`ropey`] ends a line on, which [`TextEditor::line`] yields as part of
-/// the line's own text.
-const LINE_BREAKS: [char; 7] = [
-    '\n', '\r', '\u{0B}', '\u{0C}', '\u{85}', '\u{2028}', '\u{2029}',
-];
-
 /// How far one caret motion travels. The modifiers held decide it (see
 /// [`CaretGranularity::horizontal`] and [`CaretGranularity::vertical`]), and every
 /// motion, selection and modified deletion resolves through the same
@@ -131,15 +129,9 @@ impl CaretGranularity {
     /// Delete alike); everywhere else the word jump is on Control and there is no
     /// line-jump chord, Home and End serving that role instead.
     pub fn horizontal(modifiers: &Modifiers) -> Self {
-        if cfg!(target_os = "macos") {
-            if modifiers.contains(Modifiers::META) {
-                Self::LineBoundary
-            } else if modifiers.contains(Modifiers::ALT) {
-                Self::Word
-            } else {
-                Self::Grapheme
-            }
-        } else if modifiers.contains(Modifiers::CONTROL) {
+        if TargetPlatform::get() == TargetPlatform::MacOs && modifiers.contains(Modifiers::META) {
+            Self::LineBoundary
+        } else if modifiers.contains(Modifiers::ctrl_or_alt()) {
             Self::Word
         } else {
             Self::Grapheme
@@ -150,7 +142,8 @@ impl CaretGranularity {
     /// platforms leave Control+Up/Down to the viewport and reach the document ends
     /// through Control+Home/End.
     pub fn vertical(modifiers: &Modifiers) -> Option<Self> {
-        (cfg!(target_os = "macos") && modifiers.contains(Modifiers::META)).then_some(Self::Document)
+        (TargetPlatform::get() == TargetPlatform::MacOs && modifiers.contains(Modifiers::META))
+            .then_some(Self::Document)
     }
 }
 
@@ -411,15 +404,14 @@ pub trait TextEditor {
         }
     }
 
-    /// The end of the first word past `pos`, or the end of the text when only
-    /// whitespace follows.
-    fn word_end_after(&self, pos: usize) -> usize {
+    /// Find the end of the next word from the given position, if any.
+    fn next_word_pos(&self, pos: usize) -> Option<usize> {
         let len = self.len_utf16_cu();
         if pos >= len {
-            return len;
+            return None;
         }
 
-        // Walk forward line by line starting at `pos`.
+        // Walk forward line by line starting at the given position.
         let start_char = self.utf16_cu_to_char(pos);
         let initial_line = self.char_to_line(start_char);
         let initial_offset = start_char - self.line_to_char(initial_line);
@@ -435,28 +427,27 @@ pub trait TextEditor {
                 0
             };
 
-            // Stop at the end of the first non-whitespace segment past `pos`.
+            // Stop at the end of the first non-whitespace segment past the position.
             let mut char_offset = 0;
             for word in line.text.split_word_bounds() {
                 char_offset += word.chars().count();
                 if char_offset > from && !word.chars().all(char::is_whitespace) {
-                    return self.char_to_utf16_cu(line_char_offset + char_offset);
+                    return Some(self.char_to_utf16_cu(line_char_offset + char_offset));
                 }
             }
         }
 
         // Trailing whitespace only, snap to text end.
-        len
+        Some(len)
     }
 
-    /// The start of the last word beginning before `pos`, or the start of the text
-    /// when only whitespace precedes it.
-    fn word_start_before(&self, pos: usize) -> usize {
+    /// Find the start of the previous word from the given position, if any.
+    fn prev_word_pos(&self, pos: usize) -> Option<usize> {
         if pos == 0 {
-            return 0;
+            return None;
         }
 
-        // Walk backward line by line starting at `pos`.
+        // Walk backward line by line starting at the given position.
         let start_char = self.utf16_cu_to_char(pos);
         let initial_line = self.char_to_line(start_char);
         let initial_offset = start_char - self.line_to_char(initial_line);
@@ -472,7 +463,7 @@ pub trait TextEditor {
                 line.text.chars().count()
             };
 
-            // Track the latest non-whitespace segment that starts before `pos`.
+            // Track the latest non-whitespace segment that starts before the position.
             let mut char_offset = 0;
             let mut last_word_start = None;
             for word in line.text.split_word_bounds() {
@@ -485,14 +476,13 @@ pub trait TextEditor {
                 char_offset += word.chars().count();
             }
 
-            // Found one on this line, its start is the answer.
             if let Some(start) = last_word_start {
-                return self.char_to_utf16_cu(line_char_offset + start);
+                return Some(self.char_to_utf16_cu(line_char_offset + start));
             }
         }
 
         // Leading whitespace only, snap to text start.
-        0
+        Some(0)
     }
 
     /// [`Self::find_line_boundaries`] with the line terminator left **outside**: where the
@@ -500,14 +490,9 @@ pub trait TextEditor {
     /// line, while a triple press selects the terminator too, so these are two answers rather
     /// than one.
     fn line_bounds(&self, pos: usize) -> Range<usize> {
-        let (start, end) = self.find_line_boundaries(pos);
-        let span = start..end;
-        let Some(line) = self.line(self.char_to_line(self.utf16_cu_to_char(pos))) else {
-            return span;
-        };
-        let text = line.text.as_ref();
-        let body = text.trim_end_matches(LINE_BREAKS);
-        span.start..span.end - text[body.len()..].encode_utf16().count()
+        let row = self.char_to_line(self.utf16_cu_to_char(pos));
+        let start = self.char_to_utf16_cu(self.line_to_char(row));
+        start..self.line_end_position(row).unwrap_or(start)
     }
 
     /// The position `granularity` away from `pos` in the given direction.
@@ -518,8 +503,8 @@ pub trait TextEditor {
                 self.grapheme_cluster_at(pos - 1).start
             }
             (CaretGranularity::Grapheme, false) => 0,
-            (CaretGranularity::Word, true) => self.word_end_after(pos),
-            (CaretGranularity::Word, false) => self.word_start_before(pos),
+            (CaretGranularity::Word, true) => self.next_word_pos(pos).unwrap_or(pos),
+            (CaretGranularity::Word, false) => self.prev_word_pos(pos).unwrap_or(pos),
             (CaretGranularity::LineBoundary, true) => self.line_bounds(pos).end,
             (CaretGranularity::LineBoundary, false) => self.line_bounds(pos).start,
             (CaretGranularity::Document, true) => self.len_utf16_cu(),
@@ -600,24 +585,22 @@ pub trait TextEditor {
 
     /// Move the cursor to the end of the next word.
     fn cursor_word_right(&mut self) -> bool {
-        let pos = self.cursor_pos();
-        if pos >= self.len_utf16_cu() {
-            return false;
+        if let Some(new_pos) = self.next_word_pos(self.cursor_pos()) {
+            self.selection_mut().move_to(new_pos);
+            true
+        } else {
+            false
         }
-        let to = self.word_end_after(pos);
-        self.selection_mut().move_to(to);
-        true
     }
 
     /// Move the cursor to the start of the previous word.
     fn cursor_word_left(&mut self) -> bool {
-        let pos = self.cursor_pos();
-        if pos == 0 {
-            return false;
+        if let Some(new_pos) = self.prev_word_pos(self.cursor_pos()) {
+            self.selection_mut().move_to(new_pos);
+            true
+        } else {
+            false
         }
-        let to = self.word_start_before(pos);
-        self.selection_mut().move_to(to);
-        true
     }
 
     /// Get the cursor position
@@ -847,7 +830,7 @@ pub trait TextEditor {
                 // Primary+Home/End is the document, plain Home/End the line: the
                 // convention wherever these keys exist at all, and on macOS what
                 // Fn+Left/Right produces.
-                let granularity = if modifiers.intersects(Modifiers::META | Modifiers::CONTROL) {
+                let granularity = if modifiers.contains(Modifiers::ctrl_or_meta()) {
                     CaretGranularity::Document
                 } else {
                     CaretGranularity::LineBoundary

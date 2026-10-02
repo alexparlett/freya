@@ -26,15 +26,15 @@ use crate::scrollviews::{
     ScrollController,
     shared::{
         Axis,
+        WheelBehavior,
         WheelGestureClock,
-        accelerate_wheel_movement,
+        WheelTarget,
         get_container_sizes,
         get_corrected_scroll_position,
         get_scroll_position_from_cursor,
-        get_scroll_position_from_wheel,
         get_scrollbar_pos_and_size,
         handle_key_event,
-        is_scrollable,
+        handle_wheel,
         is_scrollbar_visible,
     },
     use_scroll_controller,
@@ -253,13 +253,16 @@ impl Component for ScrollView {
         let layout = &self.layout.layout;
         let direction = layout.direction;
         let drag_scrolling = self.drag_scrolling;
-        let wheel_axis_lock = self.wheel_axis_lock;
-        let contain_wheel = self.contain_wheel;
-        let latch_wheel = self.latch_wheel;
+        let wheel_behavior = WheelBehavior {
+            invert: self.invert_scroll_wheel,
+            axis_lock: self.wheel_axis_lock,
+            contain: self.contain_wheel,
+            latch: self.latch_wheel,
+        };
         let wheel_gesture_clock = WheelGestureClock::get();
         // This view's latch decision for a wheel gesture, keyed by the gesture's identity.
         // Only ever peeked, so handler writes never re-render the view per wheel tick.
-        let mut latch = use_state(|| None::<(Instant, bool)>);
+        let latch = use_state(|| None::<(Instant, bool)>);
 
         let corrected_scrolled_x = get_corrected_scroll_position(
             size.read().inner_sizes.width,
@@ -314,7 +317,6 @@ impl Component for ScrollView {
         let (container_height, content_height) = get_container_sizes(layout.height.clone());
 
         let scroll_with_arrows = self.scroll_with_arrows;
-        let invert_scroll_wheel = self.invert_scroll_wheel;
 
         let on_capture_global_pointer_up = move |e: Event<PointerEventData>| {
             if clicking_scrollbar.read().is_some() {
@@ -334,129 +336,23 @@ impl Component for ScrollView {
         };
 
         let on_wheel = move |e: Event<WheelEventData>| {
-            // Advance the shared wheel-gesture clock, which both reads this event's acceleration
-            // and keeps the clock honest for latching descendants.
-            let gesture = wheel_gesture_clock.advance(e.timestamp, e.granularity);
-            // Only invert direction on deviced-sourced wheel events
-            let invert_direction = e.source.is_device()
-                && (*pressing_shift.read() || invert_scroll_wheel)
-                && (!*pressing_shift.read() || !invert_scroll_wheel);
-
-            let (mut x_movement, mut y_movement) = if invert_direction {
-                (e.delta_y as f32, e.delta_x as f32)
-            } else {
-                (e.delta_x as f32, e.delta_y as f32)
-            };
-
-            // Axis lock: keep a dominant-axis gesture from drifting the cross axis (e.g. a mostly
-            // vertical trackpad scroll nudging a horizontal outer view sideways). When one axis's
-            // delta exceeds the other by `threshold`×, zero the minor axis.
-            if let Some(threshold) = wheel_axis_lock {
-                let (ax, ay) = (x_movement.abs(), y_movement.abs());
-                if ay > ax * threshold {
-                    x_movement = 0.;
-                } else if ax > ay * threshold {
-                    y_movement = 0.;
-                }
-            }
-
-            // Acceleration, so a long list can be crossed with the wheel. Applied before the
-            // latch decision so the delta the decision is taken on is the delta that will move.
-            (x_movement, y_movement) = accelerate_wheel_movement(
-                (x_movement, y_movement),
-                e.granularity,
-                gesture,
-                size.read().area,
+            let handled = handle_wheel(
+                &e,
+                wheel_behavior,
+                *pressing_shift.read(),
+                &wheel_gesture_clock,
+                latch,
+                &mut scroll_controller,
+                WheelTarget {
+                    content: size.read().inner_sizes,
+                    viewport: size.read().area,
+                    scrolled: Point2D::new(corrected_scrolled_x, corrected_scrolled_y),
+                    rendered: rendered_position,
+                },
             );
-
-            // Gesture latching: a gesture belongs to a view that saw its FIRST event
-            // (`gesture.start == e.timestamp`) and could move in its direction. Every view that
-            // saw that first event is a candidate, and the innermost one able to move takes it
-            // and stops propagation, so an outer latching view only gets the gesture when the
-            // inner declined it. A view the gesture only reaches mid-flight is never a candidate
-            // and passes the whole gesture through untouched. A latched gesture is consumed below
-            // even once it pins at an end. Plain views still advance the shared clock so in-flight
-            // gestures that start over them are recognisable.
-            if latch_wheel {
-                let decision = *latch.peek();
-                let latched = match decision {
-                    Some((owned, latched)) if owned == gesture.start => latched,
-                    _ => {
-                        let latched = gesture.start == e.timestamp && {
-                            let s = size.read();
-                            get_scroll_position_from_wheel(
-                                y_movement,
-                                s.inner_sizes.height,
-                                s.area.height(),
-                                corrected_scrolled_y,
-                            ) != corrected_scrolled_y as i32
-                                || get_scroll_position_from_wheel(
-                                    x_movement,
-                                    s.inner_sizes.width,
-                                    s.area.width(),
-                                    corrected_scrolled_x,
-                                ) != corrected_scrolled_x as i32
-                        };
-                        latch.set(Some((gesture.start, latched)));
-                        latched
-                    }
-                };
-                if !latched {
-                    return;
-                }
+            if handled {
+                timeout.reset();
             }
-
-            let animate = e.granularity == WheelGranularity::Line;
-            if animate {
-                scroll_controller.animate_from(rendered_position);
-            } else {
-                scroll_controller.stop();
-            }
-            let (base_x, base_y) = if animate {
-                (corrected_scrolled_x, corrected_scrolled_y)
-            } else {
-                (rendered_position.x, rendered_position.y)
-            };
-
-            // Vertical scroll
-            let scroll_position_y = get_scroll_position_from_wheel(
-                y_movement,
-                size.read().inner_sizes.height,
-                size.read().area.height(),
-                base_y,
-            );
-            scroll_controller.scroll_to_y(scroll_position_y).then(|| {
-                e.stop_propagation();
-            });
-
-            // Horizontal scroll
-            let scroll_position_x = get_scroll_position_from_wheel(
-                x_movement,
-                size.read().inner_sizes.width,
-                size.read().area.width(),
-                base_x,
-            );
-            scroll_controller.scroll_to_x(scroll_position_x).then(|| {
-                e.stop_propagation();
-            });
-            // A latched gesture owns the event end-to-end (reaching here means this gesture
-            // bound to this view), so swallow it even once the position pins at an end.
-            if latch_wheel {
-                e.stop_propagation();
-            }
-            // Containment: swallow the event even when neither axis moved (position at an end)
-            // so the leftover delta cannot chain to an ancestor scrollable, but only while the
-            // content actually overflows: a view with nothing to scroll must stay transparent
-            // to the wheel or it would dead-zone the ancestor under the cursor.
-            else if contain_wheel {
-                let size = size.read();
-                let overflows = is_scrollable(size.inner_sizes.height, size.area.height())
-                    || is_scrollable(size.inner_sizes.width, size.area.width());
-                if overflows {
-                    e.stop_propagation();
-                }
-            }
-            timeout.reset();
         };
 
         let on_mouse_move = move |_| {

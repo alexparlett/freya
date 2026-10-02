@@ -1,5 +1,6 @@
 use std::sync::LazyLock;
 
+use freya_core::events::modifiers::ModifiersExt;
 use keyboard_types::{
     Key,
     Modifiers,
@@ -94,8 +95,8 @@ pub enum ChordKey {
     Named(NamedKey),
 }
 
-/// One keyboard chord for a text-editing action. `primary` matches Meta or Control,
-/// so a chord behaves the same across platforms.
+/// One keyboard chord for a text-editing action. `primary` is the platform's primary
+/// modifier, Cmd on macOS and Control elsewhere, so a chord behaves as each platform expects.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct EditChord {
     pub primary: bool,
@@ -105,7 +106,7 @@ pub struct EditChord {
 }
 
 impl EditChord {
-    /// Primary (Meta/Control) + `key`.
+    /// Primary (Cmd on macOS, Control elsewhere) + `key`.
     pub const fn primary(key: char) -> Self {
         Self {
             primary: true,
@@ -115,7 +116,7 @@ impl EditChord {
         }
     }
 
-    /// Primary (Meta/Control) + Shift + `key`.
+    /// Primary (Cmd on macOS, Control elsewhere) + Shift + `key`.
     pub const fn primary_shift(key: char) -> Self {
         Self {
             primary: true,
@@ -139,8 +140,13 @@ impl EditChord {
             (ChordKey::Named(expected), Key::Named(actual)) => expected == *actual,
             _ => false,
         };
+        let primary = Modifiers::ctrl_or_meta();
+        // Whichever of Cmd and Control is not the primary is just another modifier, so a chord
+        // does not fire while it is held either.
+        let secondary = (Modifiers::META | Modifiers::CONTROL).difference(primary);
         key_matches
-            && self.primary == modifiers.intersects(Modifiers::META | Modifiers::CONTROL)
+            && self.primary == modifiers.contains(primary)
+            && !modifiers.intersects(secondary)
             && self.shift == modifiers.contains(Modifiers::SHIFT)
             && self.alt == modifiers.contains(Modifiers::ALT)
     }
@@ -219,31 +225,35 @@ impl EditBindings {
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    use freya_core::events::modifiers::ModifiersExt;
+
+    use crate::config::*;
 
     #[test]
     fn chord_matching() {
         let undo = EditChord::primary('z');
-        assert!(undo.matches(&Key::Character("z".into()), &Modifiers::META));
-        assert!(undo.matches(&Key::Character("z".into()), &Modifiers::CONTROL));
+        assert!(undo.matches(&Key::Character("z".into()), &Modifiers::ctrl_or_meta()));
+        // The other of Cmd and Control is not the primary.
+        let other = (Modifiers::META | Modifiers::CONTROL).difference(Modifiers::ctrl_or_meta());
+        assert!(!undo.matches(&Key::Character("z".into()), &other));
         // No primary held, or extra modifiers held: no match.
         assert!(!undo.matches(&Key::Character("z".into()), &Modifiers::empty()));
         assert!(!undo.matches(
             &Key::Character("z".into()),
-            &(Modifiers::META | Modifiers::ALT)
+            &(Modifiers::ctrl_or_meta() | Modifiers::ALT)
         ));
         assert!(!undo.matches(
             &Key::Character("Z".into()),
-            &(Modifiers::META | Modifiers::SHIFT)
+            &(Modifiers::ctrl_or_meta() | Modifiers::SHIFT)
         ));
 
         // Shifted characters arrive uppercased; the chord still matches.
         let redo = EditChord::primary_shift('z');
         assert!(redo.matches(
             &Key::Character("Z".into()),
-            &(Modifiers::META | Modifiers::SHIFT)
+            &(Modifiers::ctrl_or_meta() | Modifiers::SHIFT)
         ));
-        assert!(!redo.matches(&Key::Character("z".into()), &Modifiers::META));
+        assert!(!redo.matches(&Key::Character("z".into()), &Modifiers::ctrl_or_meta()));
 
         let named = EditChord {
             primary: true,
@@ -251,7 +261,7 @@ mod test {
             alt: false,
             key: ChordKey::Named(NamedKey::Enter),
         };
-        assert!(named.matches(&Key::Named(NamedKey::Enter), &Modifiers::META));
+        assert!(named.matches(&Key::Named(NamedKey::Enter), &Modifiers::ctrl_or_meta()));
         assert!(!named.matches(&Key::Named(NamedKey::Enter), &Modifiers::empty()));
     }
 
@@ -259,26 +269,26 @@ mod test {
     fn bindings_resolve_actions() {
         let bindings = EditBindings::default();
         assert_eq!(
-            bindings.resolve(&Key::Character("a".into()), &Modifiers::META),
+            bindings.resolve(&Key::Character("a".into()), &Modifiers::ctrl_or_meta()),
             Some(EditAction::SelectAll)
         );
         assert_eq!(
-            bindings.resolve(&Key::Character("v".into()), &Modifiers::CONTROL),
+            bindings.resolve(&Key::Character("v".into()), &Modifiers::ctrl_or_meta()),
             Some(EditAction::Paste)
         );
         assert_eq!(
-            bindings.resolve(&Key::Character("z".into()), &Modifiers::META),
+            bindings.resolve(&Key::Character("z".into()), &Modifiers::ctrl_or_meta()),
             Some(EditAction::Undo)
         );
         assert_eq!(
             bindings.resolve(
                 &Key::Character("Z".into()),
-                &(Modifiers::META | Modifiers::SHIFT)
+                &(Modifiers::ctrl_or_meta() | Modifiers::SHIFT)
             ),
             Some(EditAction::Redo)
         );
         assert_eq!(
-            bindings.resolve(&Key::Character("y".into()), &Modifiers::META),
+            bindings.resolve(&Key::Character("y".into()), &Modifiers::ctrl_or_meta()),
             Some(EditAction::Redo)
         );
         // Plain typing and unbound chords resolve to nothing.
@@ -287,7 +297,7 @@ mod test {
             None
         );
         assert_eq!(
-            bindings.resolve(&Key::Character("t".into()), &Modifiers::META),
+            bindings.resolve(&Key::Character("t".into()), &Modifiers::ctrl_or_meta()),
             None
         );
 
@@ -298,15 +308,15 @@ mod test {
             ..EditBindings::default()
         };
         assert_eq!(
-            rebound.resolve(&Key::Character("u".into()), &Modifiers::META),
+            rebound.resolve(&Key::Character("u".into()), &Modifiers::ctrl_or_meta()),
             Some(EditAction::Undo)
         );
         assert_eq!(
-            rebound.resolve(&Key::Character("z".into()), &Modifiers::META),
+            rebound.resolve(&Key::Character("z".into()), &Modifiers::ctrl_or_meta()),
             None
         );
         assert_eq!(
-            rebound.resolve(&Key::Character("y".into()), &Modifiers::META),
+            rebound.resolve(&Key::Character("y".into()), &Modifiers::ctrl_or_meta()),
             None
         );
     }

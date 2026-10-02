@@ -5,10 +5,21 @@ use freya_testing::prelude::*;
 
 /// An input over a known font, so a press at a given x lands on a known character.
 fn measured_input(value: &'static str) -> TestingRunner {
-    let mut utils = launch_test(move || {
-        let value = use_state(|| value.to_string());
-        Input::new(value).width(Size::px(300.))
-    });
+    measured_input_on(value, TargetPlatform::detect())
+}
+
+/// [`measured_input`] as it behaves on `platform`, so a platform's shortcuts can be tested on any
+/// other.
+fn measured_input_on(value: &'static str, platform: TargetPlatform) -> TestingRunner {
+    let (mut utils, _) = TestingRunner::new(
+        move || {
+            let value = use_state(|| value.to_string());
+            Input::new(value).width(Size::px(300.))
+        },
+        (500., 500.).into(),
+        |runner| runner.provide_root_context(|| platform),
+        1.0,
+    );
     utils.set_fonts(HashMap::from_iter([(
         "NotoSans",
         include_bytes!("../../freya-edit/tests/NotoSans-Regular.ttf").as_slice(),
@@ -66,24 +77,36 @@ pub fn input_double_click_survives_the_pointer_moving_under_it() {
     utils.release_cursor((60.0, 15.0));
 }
 
-/// The line jump: Cmd on macOS, Home/End everywhere.
-#[cfg(target_os = "macos")]
-const LINE_JUMP: (Key, Key, Modifiers) = (
-    Key::Named(NamedKey::ArrowLeft),
-    Key::Named(NamedKey::ArrowRight),
-    Modifiers::META,
-);
-#[cfg(not(target_os = "macos"))]
-const LINE_JUMP: (Key, Key, Modifiers) = (
-    Key::Named(NamedKey::Home),
-    Key::Named(NamedKey::End),
-    Modifiers::empty(),
-);
-
 #[test]
 pub fn input_jumps_and_selects_to_the_line_bounds() {
-    let (to_start, to_end, jump) = LINE_JUMP;
-    let mut utils = measured_input("hello world");
+    jumps_and_selects_to_the_line_bounds(
+        TargetPlatform::Linux,
+        (
+            Key::Named(NamedKey::Home),
+            Key::Named(NamedKey::End),
+            Modifiers::empty(),
+        ),
+    );
+}
+
+#[test]
+pub fn input_jumps_and_selects_to_the_line_bounds_with_cmd_on_macos() {
+    jumps_and_selects_to_the_line_bounds(
+        TargetPlatform::MacOs,
+        (
+            Key::Named(NamedKey::ArrowLeft),
+            Key::Named(NamedKey::ArrowRight),
+            Modifiers::META,
+        ),
+    );
+}
+
+/// The line jump, given as the keys to the start and the end and the modifier they take.
+fn jumps_and_selects_to_the_line_bounds(
+    platform: TargetPlatform,
+    (to_start, to_end, jump): (Key, Key, Modifiers),
+) {
+    let mut utils = measured_input_on("hello world", platform);
 
     // Focus with the caret somewhere in the middle.
     utils.click_cursor((20.0, 15.0));
@@ -283,6 +306,43 @@ pub fn input_multiline_test() {
             .filter(|label| label.text.as_ref() == "value=\"hello\\nworld\" submitted=false")
     });
     assert!(label.is_some());
+}
+
+/// A multiline input left at its default height hugs its text between `min_height` and
+/// `max_height`, and past the cap the text scrolls inside it rather than the box growing.
+#[test]
+pub fn input_multiline_grows_with_its_text_up_to_max_height() {
+    fn multiline_app() -> impl IntoElement {
+        let value = use_state(String::new);
+        rect().child(
+            Input::new(value)
+                .multiline(true)
+                .min_height(20.)
+                .max_height(80.),
+        )
+    }
+
+    fn scroll_view_area(test: &TestingRunner) -> Area {
+        test.find(|node, element| {
+            Rect::try_downcast(element)
+                .filter(|rect| rect.accessibility.builder.role() == AccessibilityRole::ScrollView)
+                .map(|_| node.layout().area)
+        })
+        .expect("the input's scroll view")
+    }
+
+    let mut test = launch_test(multiline_app);
+    test.click_cursor((15.0, 15.0));
+    test.write_text("one");
+    let one_line = scroll_view_area(&test).height();
+    assert!(one_line > 0. && one_line < 80., "one line hugs: {one_line}");
+
+    for _ in 0..10 {
+        test.press_key(Key::Named(NamedKey::Enter));
+        test.write_text("more");
+    }
+    let many_lines = scroll_view_area(&test).height();
+    assert_eq!(many_lines, 80., "the box stops at max_height");
 }
 
 #[test]

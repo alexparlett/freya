@@ -98,7 +98,6 @@ pub struct LabelElement {
     pub event_handlers: EventHandlers,
     pub max_lines: Option<usize>,
     pub line_height: Option<f32>,
-    pub letter_spacing: Option<f32>,
     pub relative_layer: Layer,
     pub effect: Option<EffectData>,
 }
@@ -115,7 +114,6 @@ impl Default for LabelElement {
             event_handlers: Default::default(),
             max_lines: None,
             line_height: None,
-            letter_spacing: None,
             relative_layer: Layer::default(),
             effect: None,
         }
@@ -157,7 +155,6 @@ impl ElementExt for LabelElement {
 
         if self.text_style_data != label.text_style_data
             || self.line_height != label.line_height
-            || self.letter_spacing != label.letter_spacing
             || self.max_lines != label.max_lines
         {
             diff.insert(DiffModifies::TEXT_STYLE);
@@ -218,7 +215,6 @@ impl ElementExt for LabelElement {
             spans: &[Span::new(&*self.text)],
             max_lines: self.max_lines,
             line_height: self.line_height,
-            letter_spacing: self.letter_spacing,
             width: content_area_size.width,
         };
         let paragraph = context
@@ -232,18 +228,12 @@ impl ElementExt for LabelElement {
                         paragraph_style.set_ellipsis(ellipsis);
                     }
 
-                    let mut text_style = context.text_style_state.to_text_style(
+                    let text_style = context.text_style_state.to_text_style(
                         context.fallback_fonts,
                         context.scale_factor,
                         self.line_height,
                         fill_area,
                     );
-
-                    // An explicit per-label spacing overrides the inherited one.
-                    if let Some(letter_spacing) = self.letter_spacing {
-                        text_style.set_letter_spacing(letter_spacing * context.scale_factor as f32);
-                    }
-
                     paragraph_style.set_text_style(&text_style);
                     paragraph_style.set_max_lines(self.max_lines);
                     paragraph_style.set_text_align(context.text_style_state.text_align.into());
@@ -391,13 +381,6 @@ impl Label {
     /// Override the height of each line as a multiple of the font size. Pass `None` for the default.
     pub fn line_height(mut self, line_height: impl Into<Option<f32>>) -> Self {
         self.element.line_height = line_height.into();
-        self
-    }
-
-    /// Extra spacing (in pixels, scaled by the device factor) inserted between glyphs. Pass `None`
-    /// for the default (0 — no extra tracking).
-    pub fn letter_spacing(mut self, letter_spacing: impl Into<Option<f32>>) -> Self {
-        self.element.letter_spacing = letter_spacing.into();
         self
     }
 }

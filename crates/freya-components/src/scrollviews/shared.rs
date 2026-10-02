@@ -9,12 +9,18 @@ use std::{
 
 use freya_core::prelude::*;
 use torin::{
+    geometry::{
+        Point2D,
+        Size2D,
+    },
     prelude::{
         Area,
         Direction,
     },
     size::Size,
 };
+
+use crate::scrollviews::ScrollController;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Axis {
@@ -54,8 +60,8 @@ pub(crate) struct WheelGesture {
     /// The gesture's identity: the timestamp of its first event. Equal to the event's own
     /// timestamp exactly when that event started the gesture.
     pub start: Instant,
-    /// What to multiply this event's line-granularity delta by, from how fast the gesture is
-    /// arriving. One reading per event, shared by every view the event propagates through.
+    /// What to multiply this event's line delta by, from how fast the gesture is arriving. One
+    /// reading per event, shared by every view the event propagates through.
     pub acceleration: f32,
 }
 
@@ -65,7 +71,7 @@ pub(crate) struct WheelGesture {
 struct WheelGestureState {
     start: Instant,
     last: Instant,
-    granularity: WheelGranularity,
+    source: WheelSource,
     acceleration: f32,
 }
 
@@ -89,38 +95,35 @@ impl WheelGestureClock {
         })
     }
 
-    /// Advances the clock with the event stamped `timestamp` and measured in `granularity`,
+    /// Advances the clock with the device event stamped `timestamp` and reported as `source`,
     /// returning that event's reading: the gesture it belongs to and how much to accelerate it.
-    /// Every scroll view's wheel handler must call this (latching or not): a plain view keeps the
-    /// clock honest so a latching descendant can recognise an in-flight gesture it doesn't own.
+    /// Every scroll view's wheel handler must call this for device events (latching or not): a
+    /// plain view keeps the clock honest so a latching descendant can recognise an in-flight
+    /// gesture it doesn't own.
     ///
     /// One event, one reading. An event propagating through several views calls this once per
     /// view, always with the timestamp the platform stamped it with, which is what tells a repeat
     /// call apart from a genuinely fast one: measuring the gap against a per-view arrival time
     /// would read the second view's gap as zero and accelerate it to the ceiling.
     ///
-    /// A rate is only meaningful between events measured the same way, so a change of granularity
-    /// restarts the measurement while keeping the gesture's identity. Without that, a trackpad's
-    /// momentum tail (pixels, every few milliseconds) would leave the reading at the ceiling for
-    /// the next wheel notch, and a single notch would jump a whole viewport.
-    pub(crate) fn advance(
-        &self,
-        timestamp: Instant,
-        granularity: WheelGranularity,
-    ) -> WheelGesture {
+    /// A rate is only meaningful between events measured the same way, so a change from lines to
+    /// pixels or back restarts the measurement while keeping the gesture's identity. Without
+    /// that, a trackpad's momentum tail (pixels, every few milliseconds) would leave the reading
+    /// at the ceiling for the next wheel notch, and a single notch would jump a whole viewport.
+    pub(crate) fn advance(&self, timestamp: Instant, source: WheelSource) -> WheelGesture {
         let state = match self.0.get() {
             // The same event, reaching another view.
             Some(state) if state.last == timestamp => state,
             Some(state) => {
                 let gap = timestamp.saturating_duration_since(state.last);
                 if gap > WHEEL_GESTURE_WINDOW {
-                    Self::opening(timestamp, granularity)
+                    Self::opening(timestamp, source)
                 } else {
                     WheelGestureState {
                         start: state.start,
                         last: timestamp,
-                        granularity,
-                        acceleration: if granularity == state.granularity {
+                        source,
+                        acceleration: if source == state.source {
                             wheel_acceleration(gap)
                         } else {
                             1.
@@ -128,7 +131,7 @@ impl WheelGestureClock {
                     }
                 }
             }
-            None => Self::opening(timestamp, granularity),
+            None => Self::opening(timestamp, source),
         };
         self.0.set(Some(state));
         WheelGesture {
@@ -140,11 +143,11 @@ impl WheelGestureClock {
     /// The state an event opens a gesture with. It has nothing to measure a rate against, so it
     /// always moves the plain distance: a single notch is a single notch however the last gesture
     /// ended.
-    fn opening(timestamp: Instant, granularity: WheelGranularity) -> WheelGestureState {
+    fn opening(timestamp: Instant, source: WheelSource) -> WheelGestureState {
         WheelGestureState {
             start: timestamp,
             last: timestamp,
-            granularity,
+            source,
             acceleration: 1.,
         }
     }
@@ -165,11 +168,11 @@ impl WheelGestureClock {
 /// against zero.
 pub(crate) fn accelerate_wheel_delta(
     delta: f32,
-    granularity: WheelGranularity,
+    source: WheelSource,
     acceleration: f32,
     viewport_size: f32,
 ) -> f32 {
-    if granularity != WheelGranularity::Line || delta.abs() < WheelGranularity::LINE_SIZE as f32 {
+    if source != WheelSource::Line || delta.abs() < WheelSource::LINE_SIZE as f32 {
         return delta;
     }
 
@@ -181,19 +184,166 @@ pub(crate) fn accelerate_wheel_delta(
     }
 }
 
-/// Accelerates a wheel event's `(x, y)` movement against the viewport each axis scrolls within.
-/// The one place a scroll view reaches for: applying the rule per axis at every call site is how
-/// the two of them drift apart.
-pub(crate) fn accelerate_wheel_movement(
-    (x, y): (f32, f32),
-    granularity: WheelGranularity,
-    gesture: WheelGesture,
-    viewport: Area,
-) -> (f32, f32) {
-    (
-        accelerate_wheel_delta(x, granularity, gesture.acceleration, viewport.width()),
-        accelerate_wheel_delta(y, granularity, gesture.acceleration, viewport.height()),
-    )
+/// How a scroll view answers the wheel beyond moving by the delta it is given. Set through the
+/// views' `invert_scroll_wheel`, `wheel_axis_lock`, `contain_wheel` and `latch_wheel` builders.
+#[derive(Clone, Copy, PartialEq, Default)]
+pub(crate) struct WheelBehavior {
+    pub invert: bool,
+    pub axis_lock: Option<f32>,
+    pub contain: bool,
+    pub latch: bool,
+}
+
+/// What a scroll view knows about itself when a wheel event reaches it.
+pub(crate) struct WheelTarget {
+    pub content: Size2D,
+    pub viewport: Area,
+    /// The position being scrolled towards, corrected against the content.
+    pub scrolled: Point2D,
+    /// The position on screen, which trails `scrolled` while an animation runs.
+    pub rendered: Point2D,
+}
+
+/// Handles one wheel event for a scroll view: inversion, axis lock, acceleration, gesture
+/// latching, the scroll itself and containment, in that order. The one wheel pipeline both
+/// [`ScrollView`](crate::scrollviews::ScrollView) and
+/// [`VirtualScrollView`](crate::scrollviews::VirtualScrollView) run, so the two cannot drift.
+///
+/// Only device events are shaped. A synthesized event, such as accessibility focus revealing a
+/// node, already says exactly how far to move on both axes: locking an axis would leave the node
+/// hidden, and letting it join or open a gesture could have a latching view drop it.
+///
+/// Returns whether the event was handled here, so the caller knows to reset its scrollbar timeout.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_wheel(
+    e: &Event<WheelEventData>,
+    behavior: WheelBehavior,
+    pressing_shift: bool,
+    clock: &WheelGestureClock,
+    mut latch: State<Option<(Instant, bool)>>,
+    scroll_controller: &mut ScrollController,
+    target: WheelTarget,
+) -> bool {
+    let device = e.source.is_device();
+    let gesture = device.then(|| clock.advance(e.timestamp, e.source));
+
+    let invert = device && (pressing_shift != behavior.invert);
+    let (mut x_movement, mut y_movement) = if invert {
+        (e.delta_y as f32, e.delta_x as f32)
+    } else {
+        (e.delta_x as f32, e.delta_y as f32)
+    };
+
+    // Axis lock: keep a dominant-axis gesture from drifting the cross axis (e.g. a mostly
+    // vertical trackpad scroll nudging a horizontal outer view sideways). When one axis's delta
+    // exceeds the other by `threshold`×, zero the minor axis.
+    if let (Some(threshold), true) = (behavior.axis_lock, device) {
+        let (ax, ay) = (x_movement.abs(), y_movement.abs());
+        if ay > ax * threshold {
+            x_movement = 0.;
+        } else if ax > ay * threshold {
+            y_movement = 0.;
+        }
+    }
+
+    // Acceleration, so a long list can be crossed with the wheel. Applied before the latch
+    // decision so the delta the decision is taken on is the delta that will move.
+    if let Some(gesture) = gesture {
+        x_movement = accelerate_wheel_delta(
+            x_movement,
+            e.source,
+            gesture.acceleration,
+            target.viewport.width(),
+        );
+        y_movement = accelerate_wheel_delta(
+            y_movement,
+            e.source,
+            gesture.acceleration,
+            target.viewport.height(),
+        );
+    }
+
+    // Gesture latching: a gesture belongs to a view that saw its FIRST event
+    // (`gesture.start == e.timestamp`) and could move in its direction. Every view that saw that
+    // first event is a candidate, and the innermost one able to move takes it and stops
+    // propagation, so an outer latching view only gets the gesture when the inner declined it. A
+    // view the gesture only reaches mid-flight is never a candidate and passes the whole gesture
+    // through untouched. A latched gesture is consumed below even once it pins at an end.
+    let latched = match (behavior.latch, gesture) {
+        (true, Some(gesture)) => {
+            let decision = *latch.peek();
+            let latched = match decision {
+                Some((owned, latched)) if owned == gesture.start => latched,
+                _ => {
+                    let latched = gesture.start == e.timestamp
+                        && (get_scroll_position_from_wheel(
+                            y_movement,
+                            target.content.height,
+                            target.viewport.height(),
+                            target.scrolled.y,
+                        ) != target.scrolled.y as i32
+                            || get_scroll_position_from_wheel(
+                                x_movement,
+                                target.content.width,
+                                target.viewport.width(),
+                                target.scrolled.x,
+                            ) != target.scrolled.x as i32);
+                    latch.set(Some((gesture.start, latched)));
+                    latched
+                }
+            };
+            if !latched {
+                return false;
+            }
+            true
+        }
+        _ => false,
+    };
+
+    let animate = e.source == WheelSource::Line;
+    if animate {
+        scroll_controller.animate_from(target.rendered);
+    } else {
+        scroll_controller.stop();
+    }
+    let base = if animate {
+        target.scrolled
+    } else {
+        target.rendered
+    };
+
+    let scroll_position_y = get_scroll_position_from_wheel(
+        y_movement,
+        target.content.height,
+        target.viewport.height(),
+        base.y,
+    );
+    if scroll_controller.scroll_to_y(scroll_position_y) {
+        e.stop_propagation();
+    }
+
+    let scroll_position_x = get_scroll_position_from_wheel(
+        x_movement,
+        target.content.width,
+        target.viewport.width(),
+        base.x,
+    );
+    if scroll_controller.scroll_to_x(scroll_position_x) {
+        e.stop_propagation();
+    }
+
+    // A latched gesture owns the event end-to-end, so swallow it even once the position pins at
+    // an end. Containment swallows it too, but only while the content actually overflows: a view
+    // with nothing to scroll must stay transparent to the wheel or it would dead-zone the
+    // ancestor under the cursor.
+    if latched
+        || (behavior.contain
+            && (is_scrollable(target.content.height, target.viewport.height())
+                || is_scrollable(target.content.width, target.viewport.width())))
+    {
+        e.stop_propagation();
+    }
+    true
 }
 
 #[doc(hidden)]
@@ -203,7 +353,7 @@ pub fn get_scroll_position_from_wheel(
     viewport_size: f32,
     scroll_position: f32,
 ) -> i32 {
-    if !is_scrollable(inner_size, viewport_size) {
+    if viewport_size >= inner_size {
         return 0;
     }
 
@@ -254,25 +404,18 @@ pub fn get_container_sizes(size: Size) -> (Size, Size) {
 
 /// Whether an axis can scroll: its content (`inner_size`) is larger than the viewport
 /// (`viewport_size`) showing it. A zero or unmeasured viewport counts as not-yet-scrollable.
-/// The single overflow test every scroll helper (scrollbar visibility, wheel/cursor clamping,
-/// wheel latching) shares.
 #[doc(hidden)]
 pub fn is_scrollable(inner_size: f32, viewport_size: f32) -> bool {
     viewport_size > 0. && viewport_size < inner_size
 }
 
-/// Whether the scrollbar is drawn at all: the axis has to overflow *and* the viewport has to be
-/// long enough to hold the minimum-sized thumb, since a shorter one could only show a thumb that
-/// misreports how much content there is.
 #[doc(hidden)]
 pub fn is_scrollbar_visible(
     is_scrollbar_enabled: bool,
     inner_size: f32,
     viewport_size: f32,
 ) -> bool {
-    is_scrollbar_enabled
-        && is_scrollable(inner_size, viewport_size)
-        && viewport_size > MIN_SCROLLBAR_SIZE
+    is_scrollbar_enabled && viewport_size > MIN_SCROLLBAR_SIZE && viewport_size < inner_size
 }
 
 const MIN_SCROLLBAR_SIZE: f32 = 50.0;
@@ -306,7 +449,7 @@ pub fn get_scrollbar_pos_and_size(
     viewport_size: f32,
     scroll_position: f32,
 ) -> (f32, f32) {
-    if !is_scrollable(inner_size, viewport_size) || viewport_size <= MIN_SCROLLBAR_SIZE {
+    if viewport_size <= MIN_SCROLLBAR_SIZE || viewport_size >= inner_size {
         return (0.0, 0.0);
     }
 
@@ -324,7 +467,7 @@ pub fn get_scroll_position_from_cursor(
     inner_size: f32,
     viewport_size: f32,
 ) -> i32 {
-    if !is_scrollable(inner_size, viewport_size) || viewport_size <= MIN_SCROLLBAR_SIZE {
+    if viewport_size <= MIN_SCROLLBAR_SIZE || viewport_size >= inner_size {
         return 0;
     }
 
@@ -401,7 +544,7 @@ mod tests {
         Instant,
     };
 
-    use freya_core::prelude::WheelGranularity;
+    use freya_core::prelude::WheelSource;
 
     use crate::scrollviews::shared::{
         SCROLLBAR_MARGIN,
@@ -417,7 +560,7 @@ mod tests {
         wheel_acceleration,
     };
 
-    const NOTCH: f32 = WheelGranularity::LINE_SIZE as f32;
+    const NOTCH: f32 = WheelSource::LINE_SIZE as f32;
     /// Large enough that the viewport cap is not what any curve assertion is measuring.
     const TALL_VIEWPORT: f32 = 10_000.;
 
@@ -449,17 +592,14 @@ mod tests {
         let start = Instant::now();
 
         // Nothing to measure a rate against.
-        assert_eq!(
-            clock.advance(start, WheelGranularity::Line).acceleration,
-            1.
-        );
+        assert_eq!(clock.advance(start, WheelSource::Line).acceleration, 1.);
 
         // Nor after the gesture window lapses: the next event starts a gesture of its own, so a
         // single notch is a single notch however the last gesture ended.
         let fast = start + WHEEL_ACCELERATION_FAST;
-        assert!(clock.advance(fast, WheelGranularity::Line).acceleration > 1.);
+        assert!(clock.advance(fast, WheelSource::Line).acceleration > 1.);
         let next_gesture = fast + WHEEL_GESTURE_WINDOW + Duration::from_millis(1);
-        let gesture = clock.advance(next_gesture, WheelGranularity::Line);
+        let gesture = clock.advance(next_gesture, WheelSource::Line);
         assert_eq!(gesture.acceleration, 1.);
         assert_eq!(gesture.start, next_gesture);
     }
@@ -468,14 +608,14 @@ mod tests {
     fn one_event_reads_the_same_at_every_view_it_reaches() {
         let clock = WheelGestureClock::default();
         let start = Instant::now();
-        clock.advance(start, WheelGranularity::Line);
+        clock.advance(start, WheelSource::Line);
 
         // An event propagating through nested views advances the clock once per view. Measuring
         // the gap per call would read the second view's gap as zero and accelerate to the
         // ceiling, so the reading is taken once and repeated.
         let slow = start + WHEEL_ACCELERATION_SLOW;
-        let first_view = clock.advance(slow, WheelGranularity::Line);
-        let second_view = clock.advance(slow, WheelGranularity::Line);
+        let first_view = clock.advance(slow, WheelSource::Line);
+        let second_view = clock.advance(slow, WheelSource::Line);
         assert_eq!(first_view.acceleration, second_view.acceleration);
         assert_eq!(first_view.acceleration, 1.);
         assert_eq!(first_view.start, second_view.start);
@@ -490,23 +630,23 @@ mod tests {
         // would read as the fastest possible gesture.
         let mut at = start;
         for _ in 0..4 {
-            clock.advance(at, WheelGranularity::Pixel);
+            clock.advance(at, WheelSource::Pixel);
             at += WHEEL_ACCELERATION_FAST;
         }
-        assert!(clock.advance(at, WheelGranularity::Pixel).acceleration > 1.);
+        assert!(clock.advance(at, WheelSource::Pixel).acceleration > 1.);
 
         // A wheel notch arriving hard on its heels is still the same gesture, but the rate it
         // would be scaled by was measured on another device, so the notch moves its plain
         // distance rather than jumping a whole viewport.
         at += WHEEL_ACCELERATION_FAST;
-        let notch = clock.advance(at, WheelGranularity::Line);
+        let notch = clock.advance(at, WheelSource::Line);
         assert_eq!(notch.acceleration, 1.);
         assert_eq!(notch.start, start);
 
         // From there the wheel measures its own rate as usual.
         at += WHEEL_ACCELERATION_FAST;
         assert_eq!(
-            clock.advance(at, WheelGranularity::Line).acceleration,
+            clock.advance(at, WheelSource::Line).acceleration,
             WHEEL_ACCELERATION_MAX
         );
     }
@@ -516,7 +656,7 @@ mod tests {
         // A wheel event can arrive before the view has been laid out. There is no screenful to
         // cap against, and capping against zero would swallow the scroll outright.
         assert_eq!(
-            accelerate_wheel_delta(-NOTCH, WheelGranularity::Line, 4., 0.),
+            accelerate_wheel_delta(-NOTCH, WheelSource::Line, 4., 0.),
             -NOTCH * 4.
         );
     }
@@ -525,18 +665,18 @@ mod tests {
     fn only_a_whole_line_delta_is_accelerated() {
         // A wheel notch: the device has no acceleration of its own, so this is where it belongs.
         assert_eq!(
-            accelerate_wheel_delta(-NOTCH, WheelGranularity::Line, 4., TALL_VIEWPORT),
+            accelerate_wheel_delta(-NOTCH, WheelSource::Line, 4., TALL_VIEWPORT),
             -NOTCH * 4.
         );
         // A trackpad's pixel delta is already accelerated by the system.
         assert_eq!(
-            accelerate_wheel_delta(-NOTCH, WheelGranularity::Pixel, 4., TALL_VIEWPORT),
+            accelerate_wheel_delta(-NOTCH, WheelSource::Pixel, 4., TALL_VIEWPORT),
             -NOTCH
         );
         // A fraction of a line is a precision touchpad reporting through the wheel's channel,
         // which the system has likewise already accelerated.
         assert_eq!(
-            accelerate_wheel_delta(-NOTCH / 4., WheelGranularity::Line, 4., TALL_VIEWPORT),
+            accelerate_wheel_delta(-NOTCH / 4., WheelSource::Line, 4., TALL_VIEWPORT),
             -NOTCH / 4.
         );
     }
@@ -546,11 +686,11 @@ mod tests {
         // Past a screenful the reader has lost their place, and a small pane loses it sooner
         // than a large one.
         assert_eq!(
-            accelerate_wheel_delta(-NOTCH, WheelGranularity::Line, WHEEL_ACCELERATION_MAX, 120.),
+            accelerate_wheel_delta(-NOTCH, WheelSource::Line, WHEEL_ACCELERATION_MAX, 120.),
             -120.
         );
         assert_eq!(
-            accelerate_wheel_delta(NOTCH, WheelGranularity::Line, WHEEL_ACCELERATION_MAX, 120.),
+            accelerate_wheel_delta(NOTCH, WheelSource::Line, WHEEL_ACCELERATION_MAX, 120.),
             120.
         );
     }

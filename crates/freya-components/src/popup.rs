@@ -248,6 +248,9 @@ impl Component for Popup {
                 PopupBackground::new(
                     rect()
                         .a11y_role(AccessibilityRole::Dialog)
+                        // Tab stays inside the popup while it is open, and is let go as soon as
+                        // it starts closing rather than once the fade has finished.
+                        .a11y_modal(show)
                         .scale((scale, scale))
                         .opacity(opacity)
                         .corner_radius(12.)

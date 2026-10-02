@@ -333,8 +333,8 @@ impl Input {
     /// every composer in the category binds. Without an
     /// [`on_submit`](Self::on_submit) there is nothing to submit *to*, so there Enter inserts a
     /// newline as well and the modifier is simply redundant.
-    pub fn multiline(mut self, multiline: bool) -> Self {
-        self.multiline = multiline;
+    pub fn multiline(mut self, multiline: impl Into<bool>) -> Self {
+        self.multiline = multiline.into();
         self
     }
 
@@ -523,27 +523,22 @@ impl Component for Input {
 
         let enabled = use_reactive(&self.enabled);
 
-        // **What a multiline box grows to.** The paragraph reports its laid-out height and the
-        // box takes it, clamped by [`Input::max_height`], so the box is exactly as tall as its
-        // text until the cap, and the `ScrollView` inside takes over from there. Written only on
-        // an actual change, or each layout pass would schedule the next one.
-        let mut content_height = use_state(|| 0f32);
         let multiline_layout = self.multiline;
-        let resolved_height = match (self.multiline, self.max_height) {
-            // A height stated outright bounds the box directly and the `ScrollView` inside
-            // scrolls within it; only a height left at its default lets the box grow.
-            (true, _) if !matches!(self.height, Size::Inner) => self.height.clone(),
-            (true, Some(max)) => Size::px(
-                (*content_height.read()).clamp(self.min_height.unwrap_or(0.).min(max), max),
-            ),
-            (true, None) => Size::Inner,
-            (false, _) => self.height.clone(),
-        };
 
         // Whether the box has a height of its own for the text to scroll inside. A box still
         // growing with its text must let that height through instead, or the `ScrollView`
         // would fill a parent that is itself sized by this content.
-        let bounded_height = multiline_layout && !matches!(resolved_height, Size::Inner);
+        let bounded_height = multiline_layout && !matches!(self.height, Size::Inner);
+
+        // **What a multiline box grows to.** A height stated outright bounds the box directly;
+        // left at its default, the box hugs its text between [`Input::min_height`] and
+        // [`Input::max_height`], and the `ScrollView` inside is capped at the same height, so
+        // past the cap the text scrolls rather than the box growing. Both are layout
+        // constraints, so the box follows its text in the same frame.
+        let growth = match (multiline_layout && !bounded_height, self.max_height) {
+            (true, Some(max)) => Some((self.min_height.unwrap_or(0.).min(max), max)),
+            _ => None,
+        };
 
         let display_placeholder = value.read().is_empty()
             && self.placeholder.is_some()
@@ -871,15 +866,6 @@ impl Component for Input {
 
             let text_size_changed = area.peek().size != e.area.size;
             area.set_if_modified(e.area);
-            // **The paragraph's own laid-out height.** `area` is the right signal here and
-            // `inner_sizes` is not: a paragraph's children are spans rather than laid-out
-            // nodes, so its accumulated inner size measures ~0 and a box following it
-            // collapses to its margins. The `ScrollView` above does not force this paragraph
-            // to fill, so `area` is the text's height rather than the box's, and the feedback
-            // settles rather than ratcheting.
-            if multiline_layout && *content_height.peek() != e.area.height() {
-                content_height.set(e.area.height());
-            }
             if text_size_changed {
                 follow_cursor();
             }
@@ -968,7 +954,10 @@ impl Component for Input {
                 CursorIcon::NotAllowed
             })
             .width(self.width.clone())
-            .height(resolved_height)
+            .height(self.height.clone())
+            .map(growth, |el, (min, max)| {
+                el.min_height(Size::px(min)).max_height(Size::px(max))
+            })
             .background(background.mul_if(!self.enabled, 0.85))
             .border(border)
             .border(focus_ring)
@@ -996,6 +985,7 @@ impl Component for Input {
                         true => Size::fill(),
                         false => Size::Inner,
                     })
+                    .map(growth, |el, (_, max)| el.max_height(Size::px(max)))
                     .direction(match self.multiline {
                         true => Direction::Vertical,
                         false => Direction::Horizontal,

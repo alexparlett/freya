@@ -334,6 +334,8 @@ mod test {
         EventName::CaptureGlobalPointerUp,
         EventName::Wheel,
         EventName::Sized,
+        EventName::Visible,
+        EventName::Hidden,
         EventName::Styled,
         EventName::FileDrop,
         EventName::ImePreedit,

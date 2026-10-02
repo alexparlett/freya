@@ -87,8 +87,7 @@ pub fn virtual_scroll_view_smooth_scrolling() {
         name: WheelEventName::Wheel,
         scroll: (0., -300.).into(),
         cursor: (5., 5.).into(),
-        source: WheelSource::Device,
-        granularity: WheelGranularity::Line,
+        source: WheelSource::Line,
         timestamp: Instant::now(),
     });
     test.sync_and_update();

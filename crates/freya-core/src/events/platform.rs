@@ -14,7 +14,6 @@ use crate::{
     events::{
         data::{
             MouseButton,
-            WheelGranularity,
             WheelSource,
         },
         name::EventName,
@@ -111,7 +110,6 @@ pub enum PlatformEvent {
         scroll: CursorPoint,
         cursor: CursorPoint,
         source: WheelSource,
-        granularity: WheelGranularity,
         timestamp: Instant,
     },
     /// A Touch Event.

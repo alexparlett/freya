@@ -30,7 +30,6 @@ use ragnarok::EventsExecutorRunner;
 use rustc_hash::FxHashMap;
 use torin::prelude::{
     CursorPoint,
-    Point2D,
     Size2D,
 };
 #[cfg(all(feature = "tray", not(target_os = "linux")))]
@@ -1259,13 +1258,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                 }
 
                 WindowEvent::Moved(position) => {
-                    // Publish the new outer position in logical units (like `root_size`), so
-                    // userland can persist/restore where the window sits.
-                    let scale_factor = app.window.scale_factor() as f32;
-                    app.platform.window_position.set_if_modified(Point2D::new(
-                        position.x as f32 / scale_factor,
-                        position.y as f32 / scale_factor,
-                    ));
+                    app.set_window_position(position);
                 }
 
                 WindowEvent::MouseInput { state, button, .. } => {
@@ -1338,36 +1331,29 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                 }
 
                 WindowEvent::MouseWheel { delta, phase, .. } => {
+                    const WHEEL_SPEED_MODIFIER: f64 = WheelSource::LINE_SIZE;
                     const TOUCHPAD_SPEED_MODIFIER: f64 = 2.0;
 
                     if TouchPhase::Moved == phase {
-                        // Deltas are pixelized here so every consumer works in one unit, but which
-                        // resolution the device reported travels with the event: a line device has
-                        // no acceleration of its own, a pixel device is already accelerated.
-                        let (scroll_data, granularity) = match delta {
+                        let (delta_x, delta_y, source) = match delta {
                             MouseScrollDelta::LineDelta(x, y) => (
-                                (
-                                    x as f64 * WheelGranularity::LINE_SIZE,
-                                    y as f64 * WheelGranularity::LINE_SIZE,
-                                ),
-                                WheelGranularity::Line,
+                                x as f64 * WHEEL_SPEED_MODIFIER,
+                                y as f64 * WHEEL_SPEED_MODIFIER,
+                                WheelSource::Line,
                             ),
-                            MouseScrollDelta::PixelDelta(pos) => (
-                                (
-                                    pos.x * TOUCHPAD_SPEED_MODIFIER,
-                                    pos.y * TOUCHPAD_SPEED_MODIFIER,
-                                ),
-                                WheelGranularity::Pixel,
+                            MouseScrollDelta::PixelDelta(position) => (
+                                position.x * TOUCHPAD_SPEED_MODIFIER,
+                                position.y * TOUCHPAD_SPEED_MODIFIER,
+                                WheelSource::Pixel,
                             ),
                         };
 
                         app.process_platform_events(
                             vec![PlatformEvent::Wheel {
                                 name: WheelEventName::Wheel,
-                                scroll: scroll_data.into(),
+                                scroll: (delta_x, delta_y).into(),
                                 cursor: app.position,
-                                source: WheelSource::Device,
-                                granularity,
+                                source,
                                 timestamp: Instant::now(),
                             }],
                             &mut self.plugins,

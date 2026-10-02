@@ -43,6 +43,9 @@ pub struct EditorHistory {
     pub version: usize,
     /// After how many seconds since the last transaction a change should be grouped with the last transaction.
     transaction_threshold_groping: Duration,
+    /// Set by [`seal_transaction`](Self::seal_transaction): the next change starts a new
+    /// transaction whatever the threshold says.
+    sealed: bool,
 }
 
 impl EditorHistory {
@@ -52,6 +55,7 @@ impl EditorHistory {
             current_transaction: 0,
             version: 0,
             transaction_threshold_groping,
+            sealed: false,
         }
     }
 
@@ -63,7 +67,9 @@ impl EditorHistory {
         let last_transaction = self
             .transactions
             .get_mut(self.current_transaction.saturating_sub(1));
+        let sealed = std::mem::take(&mut self.sealed);
         if let Some(last_transaction) = last_transaction
+            && !sealed
             && last_transaction.timestamp.elapsed() <= self.transaction_threshold_groping
         {
             last_transaction.changes.push(change);
@@ -90,15 +96,7 @@ impl EditorHistory {
     /// own [`current_change`](Self::current_change) — instead of merging into the
     /// last interactive typing burst.
     pub fn seal_transaction(&mut self) {
-        if let Some(last) = self
-            .transactions
-            .get_mut(self.current_transaction.saturating_sub(1))
-            && let Some(past) = last
-                .timestamp
-                .checked_sub(self.transaction_threshold_groping + Duration::from_nanos(1))
-        {
-            last.timestamp = past;
-        }
+        self.sealed = true;
     }
 
     pub fn any_pending_changes(&self) -> usize {
@@ -414,5 +412,39 @@ mod test {
         let selection = history.redo(&mut rope).unwrap();
         assert_eq!(selection, TextSelection::new_cursor(5));
         assert_eq!(rope.to_string(), "Hello");
+    }
+
+    #[test]
+    fn sealing_starts_a_new_transaction_inside_the_grouping_threshold() {
+        let insert = |idx: usize| HistoryChange::InsertText {
+            idx,
+            text: "a".to_owned(),
+            len: 1,
+            selection: TextSelection::new_cursor(idx),
+        };
+        let mut history = EditorHistory::new(Duration::from_secs(60));
+
+        history.push_change(insert(0));
+        history.push_change(insert(1));
+        assert_eq!(
+            history.current_change(),
+            1,
+            "grouped while within the threshold"
+        );
+
+        history.seal_transaction();
+        history.push_change(insert(2));
+        assert_eq!(
+            history.current_change(),
+            2,
+            "the seal opened a new transaction"
+        );
+
+        history.push_change(insert(3));
+        assert_eq!(
+            history.current_change(),
+            2,
+            "and the seal lasts for one change only"
+        );
     }
 }

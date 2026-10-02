@@ -13,7 +13,10 @@ use torin::{
     },
 };
 
-use crate::scrollviews::shared::get_corrected_scroll_position;
+use crate::scrollviews::{
+    ItemSize,
+    shared::get_corrected_scroll_position,
+};
 
 /// Where along an axis a scroll should land, the beginning or the end.
 #[derive(Default, PartialEq, Eq)]
@@ -207,7 +210,7 @@ impl ScrollController {
     }
 
     fn bounded_position(&self, position: i32, direction: Direction) -> i32 {
-        let Some((content_size, viewport_size)) = *self.bounds.read() else {
+        let Some((content_size, viewport_size)) = *self.bounds.peek() else {
             return position;
         };
 
@@ -273,8 +276,9 @@ impl ScrollController {
         let position = match direction {
             Direction::Horizontal => x,
             Direction::Vertical => y,
-        };
-        let position = get_corrected_scroll_position(content, viewport, position as f32);
+        } as f32;
+        // Bounded on every layout, so once there are bounds to compare against the stored
+        // position is already within them.
         // The scroll position is negative-going: the content is offset up by how far down the
         // reader is, so the end is where that offset covers everything the viewport does not.
         (position.abs() + viewport) >= content - 1.0
@@ -287,36 +291,20 @@ impl ScrollController {
     /// position. A no-op once the item is already visible, so it is safe to call every render (an
     /// item larger than the viewport aligns to its start and stops, rather than oscillating).
     ///
+    /// Jumps straight there, freezing any smooth scroll in flight first: the item's rectangle
+    /// was measured where the content is drawn, which trails the target while an animation runs.
+    /// See [`animate_to_item`](Self::animate_to_item) for a smooth reveal.
+    ///
     /// Peeks rather than reads: it is imperative, and reading inside a reactive effect would
     /// subscribe that effect to the viewport and loop it against its own scroll write.
     pub fn scroll_to_item(&mut self, item: impl Into<Area>) {
-        let item = item.into();
-        let viewport = *self.viewport.peek();
-        // Not laid out yet: nothing meaningful to reveal against.
-        if viewport.width() <= 0.0 || viewport.height() <= 0.0 {
-            return;
-        }
-        let (x, y) = *self.scroll.peek();
+        self.reveal_item(item.into(), false);
+    }
 
-        let dx = reveal_delta(
-            item.min_x(),
-            item.max_x(),
-            viewport.min_x(),
-            viewport.max_x(),
-        );
-        let dy = reveal_delta(
-            item.min_y(),
-            item.max_y(),
-            viewport.min_y(),
-            viewport.max_y(),
-        );
-
-        if dx != 0.0 {
-            self.scroll_to_x((x as f32 + dx).round() as i32);
-        }
-        if dy != 0.0 {
-            self.scroll_to_y((y as f32 + dy).round() as i32);
-        }
+    /// [`scroll_to_item`](Self::scroll_to_item), moving there with the same smooth scroll the
+    /// wheel and the arrow keys use.
+    pub fn animate_to_item(&mut self, item: impl Into<Area>) {
+        self.reveal_item(item.into(), true);
     }
 
     /// [`scroll_to_item`](Self::scroll_to_item) for a target that has no measured rectangle: scrolls
@@ -326,9 +314,10 @@ impl ScrollController {
     /// This is the [`VirtualScrollView`](crate::scrollviews::VirtualScrollView) half of the pair. A
     /// virtualized view only builds the items inside its viewport, so the row a caller wants to
     /// reveal usually does not exist yet and can report no [`Area`] to reveal against. What the
-    /// caller does know is where the row sits in the content: for a fixed item size that is
-    /// `index * item_size`. Everything else, the viewport and the current position, is this
-    /// controller's own, exactly as it is for `scroll_to_item`.
+    /// caller does know is where the row sits in the content, which
+    /// [`scroll_to_index`](Self::scroll_to_index) works out from an [`ItemSize`]. Everything else,
+    /// the viewport and the current position, is this controller's own, exactly as it is for
+    /// `scroll_to_item`.
     ///
     /// A no-op once the span is already visible, so it is safe to call every render.
     ///
@@ -342,25 +331,96 @@ impl ScrollController {
     /// visible span of the content starts at `-position`. Everything is peeked rather than read,
     /// for [`scroll_to_item`](Self::scroll_to_item)'s reason.
     pub fn scroll_to_offset(&mut self, offset: f32, size: f32, direction: Direction) {
+        self.reveal_offset(offset, size, direction, false);
+    }
+
+    /// [`scroll_to_offset`](Self::scroll_to_offset), moving there with the same smooth scroll the
+    /// wheel and the arrow keys use.
+    pub fn animate_to_offset(&mut self, offset: f32, size: f32, direction: Direction) {
+        self.reveal_offset(offset, size, direction, true);
+    }
+
+    /// [`scroll_to_offset`](Self::scroll_to_offset) for the item at `index` of a
+    /// [`VirtualScrollView`](crate::scrollviews::VirtualScrollView) sized by `item_size`.
+    ///
+    /// With [`ItemSize::Dynamic`] the offset is summed from the sizes before `index`, while the
+    /// view extrapolates its total size from the items it has measured, so near the end of a list
+    /// of uneven items the two can disagree by the error in that estimate.
+    pub fn scroll_to_index(&mut self, index: usize, item_size: &ItemSize, direction: Direction) {
+        self.scroll_to_offset(item_size.offset_of(index), item_size.at(index), direction);
+    }
+
+    /// Where the content is drawn right now: the animated position while a smooth scroll runs,
+    /// the target otherwise.
+    fn drawn_position(&self) -> Point2D {
+        if self.task.peek().is_some() {
+            self.damp.peek().position
+        } else {
+            let (x, y) = *self.scroll.peek();
+            Point2D::new(x as f32, y as f32)
+        }
+    }
+
+    /// Moves the drawn position by `delta`, smoothly or at once.
+    fn reveal_by(&mut self, delta: Vector2D, animate: bool) {
+        if delta == Vector2D::zero() {
+            return;
+        }
+        let from = self.drawn_position();
+        if animate {
+            self.animate_from(from);
+        } else if self.task.peek().is_some() {
+            self.stop();
+        }
+        if delta.x != 0.0 {
+            self.scroll_to_x((from.x + delta.x).round() as i32);
+        }
+        if delta.y != 0.0 {
+            self.scroll_to_y((from.y + delta.y).round() as i32);
+        }
+    }
+
+    fn reveal_item(&mut self, item: Area, animate: bool) {
+        let viewport = *self.viewport.peek();
+        // Not laid out yet: nothing meaningful to reveal against.
+        if viewport.width() <= 0.0 || viewport.height() <= 0.0 {
+            return;
+        }
+        let delta = Vector2D::new(
+            reveal_delta(
+                item.min_x(),
+                item.max_x(),
+                viewport.min_x(),
+                viewport.max_x(),
+            ),
+            reveal_delta(
+                item.min_y(),
+                item.max_y(),
+                viewport.min_y(),
+                viewport.max_y(),
+            ),
+        );
+        self.reveal_by(delta, animate);
+    }
+
+    fn reveal_offset(&mut self, offset: f32, size: f32, direction: Direction, animate: bool) {
         let (content, viewport) = Self::extents(*self.bounds.peek(), direction);
         if viewport <= 0.0 || content <= 0.0 {
             return;
         }
-        let (x, y) = *self.scroll.peek();
+        let drawn = self.drawn_position();
         let position = match direction {
-            Direction::Horizontal => x,
-            Direction::Vertical => y,
+            Direction::Horizontal => drawn.x,
+            Direction::Vertical => drawn.y,
         };
-        let position = get_corrected_scroll_position(content, viewport, position as f32);
         let delta = reveal_delta(offset, offset + size, -position, -position + viewport);
-        if delta == 0.0 {
-            return;
-        }
-        let to = (position + delta).round() as i32;
-        match direction {
-            Direction::Horizontal => self.scroll_to_x(to),
-            Direction::Vertical => self.scroll_to_y(to),
-        };
+        self.reveal_by(
+            match direction {
+                Direction::Horizontal => Vector2D::new(delta, 0.0),
+                Direction::Vertical => Vector2D::new(0.0, delta),
+            },
+            animate,
+        );
     }
 }
 
@@ -512,7 +572,7 @@ impl ScrollController {
     }
 
     fn start(&mut self, current: Point2D, velocity: Option<Vector2D>, smooth_time: f32) {
-        let is_animating = self.task.read().is_some();
+        let is_animating = self.task.peek().is_some();
         {
             let mut damp = self.damp.write();
             damp.smooth_time = smooth_time;

@@ -45,6 +45,7 @@ use winit::{
     dpi::{
         LogicalPosition,
         LogicalSize,
+        PhysicalPosition,
     },
     event::ElementState,
     event_loop::{
@@ -510,11 +511,26 @@ impl AppWindow {
         self.window.scale_factor() * *self.platform.custom_scale_factor.peek()
     }
 
+    /// Publishes the window's outer position in the same logical units as
+    /// [`Platform::root_size`](freya_core::prelude::Platform::root_size), so userland can
+    /// persist and restore where the window sits.
+    pub(crate) fn set_window_position(&mut self, position: PhysicalPosition<i32>) {
+        let scale_factor = self.effective_scale_factor() as f32;
+        self.platform.window_position.set_if_modified(Point2D::new(
+            position.x as f32 / scale_factor,
+            position.y as f32 / scale_factor,
+        ));
+    }
+
     /// Syncs the effective scale factor on [`Platform`] and invalidates layout.
     pub fn scale_factor_changed(&mut self) {
         self.platform
             .scale_factor
             .set(self.effective_scale_factor());
+        // The position is published in logical units, so a new factor moves it too.
+        if let Ok(position) = self.window.outer_position() {
+            self.set_window_position(position);
+        }
         self.process_layout_on_next_render = true;
         self.tree
             .set_scale_factor(self.effective_scale_factor() as f32);

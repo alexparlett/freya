@@ -86,8 +86,7 @@ pub struct Menu {
     children: Vec<Element>,
     on_close: Option<EventHandler<()>>,
     on_escape: Option<EventHandler<()>>,
-    min_width: Option<Size>,
-    min_height: Option<Size>,
+    layout: LayoutData,
     key: DiffKey,
 }
 
@@ -126,19 +125,17 @@ impl Menu {
         self.theme = Some(theme);
         self
     }
+}
 
-    /// A minimum width for the menu's container, so short items don't collapse / wrap.
-    pub fn min_width(mut self, min_width: impl Into<Size>) -> Self {
-        self.min_width = Some(min_width.into());
-        self
-    }
-
-    /// A minimum height for the menu's container.
-    pub fn min_height(mut self, min_height: impl Into<Size>) -> Self {
-        self.min_height = Some(min_height.into());
-        self
+/// Size constraints for the menu's container, e.g. a `min_width` so short items don't collapse
+/// or wrap.
+impl LayoutExt for Menu {
+    fn get_layout(&mut self) -> &mut LayoutData {
+        &mut self.layout
     }
 }
+
+impl ContainerConstraintsExt for Menu {}
 
 impl ComponentOwned for Menu {
     fn render(self) -> impl IntoElement {
@@ -204,8 +201,7 @@ impl ComponentOwned for Menu {
             .child(
                 MenuContainer::new()
                     .map(self.theme, |el, theme| el.theme(theme))
-                    .map(self.min_width, |el, w| el.min_width(w))
-                    .map(self.min_height, |el, h| el.min_height(h))
+                    .layout(self.layout)
                     .children(self.children),
             )
     }
@@ -234,8 +230,7 @@ const MENU_BORDER_WIDTH: f32 = 1.;
 pub struct MenuContainer {
     pub(crate) theme: Option<MenuContainerThemePartial>,
     children: Vec<Element>,
-    min_width: Option<Size>,
-    min_height: Option<Size>,
+    layout: LayoutData,
     key: DiffKey,
 }
 
@@ -260,19 +255,16 @@ impl MenuContainer {
         self.theme = Some(theme);
         self
     }
+}
 
-    /// A minimum width for the container box.
-    pub fn min_width(mut self, min_width: impl Into<Size>) -> Self {
-        self.min_width = Some(min_width.into());
-        self
-    }
-
-    /// A minimum height for the container box.
-    pub fn min_height(mut self, min_height: impl Into<Size>) -> Self {
-        self.min_height = Some(min_height.into());
-        self
+/// Size constraints for the container box.
+impl LayoutExt for MenuContainer {
+    fn get_layout(&mut self) -> &mut LayoutData {
+        &mut self.layout
     }
 }
+
+impl ContainerConstraintsExt for MenuContainer {}
 
 impl ComponentOwned for MenuContainer {
     fn render(self) -> impl IntoElement {
@@ -333,8 +325,10 @@ impl ComponentOwned for MenuContainer {
                             .fill(theme.border_fill),
                     )
                     .content(Content::fit())
-                    .map(self.min_width, |el, w| el.min_width(w))
-                    .map(self.min_height, |el, h| el.min_height(h))
+                    .min_width(self.layout.layout.minimum_width)
+                    .min_height(self.layout.layout.minimum_height)
+                    .max_width(self.layout.layout.maximum_width)
+                    .max_height(self.layout.layout.maximum_height)
                     .children(self.children),
             )
     }
@@ -661,8 +655,7 @@ pub struct SubMenu {
     pub(crate) theme: Option<MenuContainerThemePartial>,
     label: Option<Element>,
     items: Vec<Element>,
-    min_width: Option<Size>,
-    min_height: Option<Size>,
+    layout: LayoutData,
     key: DiffKey,
 }
 
@@ -687,23 +680,20 @@ impl SubMenu {
         self.theme = Some(theme);
         self
     }
+}
 
-    /// A minimum width for the flyout, like [`Menu::min_width`].
-    ///
-    /// Worth having for the same reason the root menu's is: a row that puts something on its
-    /// trailing edge — a shortcut hint, a submenu chevron — needs the container to have a width
-    /// before it can push anything to the far side of it.
-    pub fn min_width(mut self, min_width: impl Into<Size>) -> Self {
-        self.min_width = Some(min_width.into());
-        self
-    }
-
-    /// A minimum height for the flyout, like [`Menu::min_height`].
-    pub fn min_height(mut self, min_height: impl Into<Size>) -> Self {
-        self.min_height = Some(min_height.into());
-        self
+/// Size constraints for the flyout, as for [`Menu`].
+///
+/// A `min_width` is worth having for the same reason the root menu's is: a row that puts
+/// something on its trailing edge — a shortcut hint, a submenu chevron — needs the container to
+/// have a width before it can push anything to the far side of it.
+impl LayoutExt for SubMenu {
+    fn get_layout(&mut self) -> &mut LayoutData {
+        &mut self.layout
     }
 }
+
+impl ContainerConstraintsExt for SubMenu {}
 
 impl ChildrenExt for SubMenu {
     fn get_children(&mut self) -> &mut Vec<Element> {
@@ -772,8 +762,7 @@ impl ComponentOwned for SubMenu {
                         rect().content(Content::fit()).child(
                             MenuContainer::new()
                                 .map(self.theme, |el, theme| el.theme(theme))
-                                .map(self.min_width, |el, w| el.min_width(w))
-                                .map(self.min_height, |el, h| el.min_height(h))
+                                .layout(self.layout)
                                 .children(self.items),
                         ),
                     )

@@ -2,6 +2,7 @@ use freya_core::prelude::*;
 use torin::{
     content::Content,
     gaps::Gaps,
+    node::Node,
     prelude::Alignment,
     size::Size,
 };
@@ -14,6 +15,8 @@ use crate::{
         arrow::ArrowIcon,
     },
     scrollviews::{
+        ScrollBar,
+        ScrollBarContext,
         ScrollController,
         VirtualItem,
         VirtualScrollView,
@@ -72,6 +75,14 @@ impl Default for TreeConfig {
         }
     }
 }
+
+/// The live [`TreeConfig`] a [`Tree`] shares with its rows.
+///
+/// A [`Readable`] rather than a plain value: `use_try_consume` runs once per row, so a row reading
+/// a plain context would keep the metrics it was mounted with when the theme later changes them,
+/// while the scroll view would already be using the new row height.
+#[derive(Clone)]
+pub struct TreeConfigContext(pub Readable<TreeConfig>);
 
 /// Whether an item can be opened, and whether it is.
 ///
@@ -225,7 +236,9 @@ impl KeyExt for TreeItem {
 impl Component for TreeItem {
     fn render(&self) -> impl IntoElement {
         let theme = get_theme!(&self.theme, TreeThemePreference, "tree");
-        let config = use_try_consume::<TreeConfig>().unwrap_or_default();
+        let config = use_try_consume::<TreeConfigContext>()
+            .map(|config| *config.0.read())
+            .unwrap_or_default();
         let mut hovering = use_state(|| false);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
@@ -286,11 +299,7 @@ impl Component for TreeItem {
                 // otherwise have a dead patch exactly where its chevron is.
                 .map(on_toggle, |el, on_toggle| {
                     el.on_pointer_down(move |e: Event<PointerEventData>| {
-                        let secondary = matches!(
-                            e.data(),
-                            PointerEventData::Mouse(m) if m.button == Some(MouseButton::Right)
-                        );
-                        if !secondary {
+                        if e.button() != Some(MouseButton::Right) {
                             e.stop_propagation();
                         }
                     })
@@ -298,10 +307,10 @@ impl Component for TreeItem {
                 })
             });
 
-        // An item with no `on_press` is a row that happens to live in a tree, not a link: a tab
-        // stop and a focus ring on it would promise an activation no key can perform. So role,
-        // focusability and the ring all follow whether the item is actually pressable, the same
-        // rule `SideBarItem` follows.
+        // An item with no `on_press` is a row that happens to live in a tree and nothing more: a
+        // tab stop and a focus ring on it would promise an activation no key can perform. So
+        // focusability and the ring follow whether the item is actually pressable, the same rule
+        // `SideBarItem` follows.
         let pressable = self.on_press.is_some();
         let focus_border = (pressable && focus() == Focus::Keyboard).then(|| {
             Border::new()
@@ -313,10 +322,17 @@ impl Component for TreeItem {
         rect()
             .a11y_id(a11y_id)
             .a11y_focusable(pressable)
-            .a11y_role(if pressable {
-                AccessibilityRole::Link
-            } else {
-                AccessibilityRole::GenericContainer
+            .a11y_role(AccessibilityRole::TreeItem)
+            .a11y_builder({
+                let selected = self.selected;
+                move |node| {
+                    node.set_selected(selected);
+                    match disclosure {
+                        Disclosure::Leaf => {}
+                        Disclosure::Collapsed => node.set_expanded(false),
+                        Disclosure::Expanded => node.set_expanded(true),
+                    }
+                }
             })
             .border(focus_border)
             .height(Size::px(config.item_height))
@@ -370,8 +386,12 @@ pub struct Tree<D, B: Fn(VirtualItem, &D) -> Element> {
     builder: B,
     builder_data: D,
     length: usize,
-    height: Size,
+    layout: LayoutData,
     scroll_controller: Option<ScrollController>,
+    show_scrollbar: bool,
+    scroll_with_arrows: bool,
+    drag_scrolling: bool,
+    scrollbar: Callback<ScrollBarContext, Element>,
     key: DiffKey,
 }
 
@@ -382,23 +402,19 @@ impl<D: PartialEq, B: Fn(VirtualItem, &D) -> Element> PartialEq for Tree<D, B> {
         self.theme == other.theme
             && self.builder_data == other.builder_data
             && self.length == other.length
-            && self.height == other.height
+            && self.layout == other.layout
             && self.scroll_controller == other.scroll_controller
+            && self.show_scrollbar == other.show_scrollbar
+            && self.scroll_with_arrows == other.scroll_with_arrows
+            && self.drag_scrolling == other.drag_scrolling
+            && self.scrollbar == other.scrollbar
     }
 }
 
 impl<B: Fn(VirtualItem, &()) -> Element> Tree<(), B> {
     /// A tree whose rows are built by index.
     pub fn new(builder: B) -> Self {
-        Self {
-            theme: None,
-            builder,
-            builder_data: (),
-            length: 0,
-            height: Size::fill(),
-            scroll_controller: None,
-            key: DiffKey::None,
-        }
+        Tree::new_with_data((), builder)
     }
 }
 
@@ -411,8 +427,17 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> Tree<D, B> {
             builder,
             builder_data,
             length: 0,
-            height: Size::fill(),
+            layout: Node {
+                width: Size::fill(),
+                height: Size::fill(),
+                ..Default::default()
+            }
+            .into(),
             scroll_controller: None,
+            show_scrollbar: true,
+            scroll_with_arrows: true,
+            drag_scrolling: true,
+            scrollbar: ScrollBar::default_renderer(),
             key: DiffKey::None,
         }
     }
@@ -423,16 +448,12 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> Tree<D, B> {
         self
     }
 
-    pub fn height(mut self, height: impl Into<Size>) -> Self {
-        self.height = height.into();
-        self
-    }
-
     /// Attaches a [`ScrollController`] to drive the tree externally.
     ///
     /// The reason a tree wants one is revealing a row: the caller knows which row it means by index,
-    /// and [`ScrollController::scroll_to_offset`] turns that index into a scroll without the row
-    /// having to exist yet, which for a virtualized tree is the usual case.
+    /// and [`ScrollController::scroll_to_index`] turns that index into a scroll without the row
+    /// having to exist yet, which for a virtualized tree is the usual case. Pass it the tree's
+    /// row height as an [`ItemSize`](crate::scrollviews::ItemSize).
     pub fn scroll_controller(
         mut self,
         scroll_controller: impl Into<Option<ScrollController>>,
@@ -445,7 +466,39 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> Tree<D, B> {
         self.theme = Some(theme);
         self
     }
+
+    /// Toggles whether the scrollbars are shown when the rows overflow.
+    pub fn show_scrollbar(mut self, show_scrollbar: bool) -> Self {
+        self.show_scrollbar = show_scrollbar;
+        self
+    }
+
+    /// Toggles whether the arrow keys scroll the tree while it is focused.
+    pub fn scroll_with_arrows(mut self, scroll_with_arrows: impl Into<bool>) -> Self {
+        self.scroll_with_arrows = scroll_with_arrows.into();
+        self
+    }
+
+    /// Toggles scrolling by dragging the rows, useful mainly for touch input.
+    pub fn drag_scrolling(mut self, drag_scrolling: bool) -> Self {
+        self.drag_scrolling = drag_scrolling;
+        self
+    }
+
+    /// Sets the renderer used for each visible scrollbar.
+    pub fn scrollbar(mut self, scrollbar: impl Into<Callback<ScrollBarContext, Element>>) -> Self {
+        self.scrollbar = scrollbar.into();
+        self
+    }
 }
+
+impl<D, B: Fn(VirtualItem, &D) -> Element> LayoutExt for Tree<D, B> {
+    fn get_layout(&mut self) -> &mut LayoutData {
+        &mut self.layout
+    }
+}
+
+impl<D, B: Fn(VirtualItem, &D) -> Element> ContainerExt for Tree<D, B> {}
 
 impl<D: PartialEq, B: Fn(VirtualItem, &D) -> Element> KeyExt for Tree<D, B> {
     fn write_key(&mut self) -> &mut DiffKey {
@@ -466,21 +519,30 @@ impl<D: Clone + PartialEq + 'static, B: Clone + Fn(VirtualItem, &D) -> Element +
             corner_radius,
             ..
         } = theme;
-        use_provide_context(|| TreeConfig {
+        let config = TreeConfig {
             indent,
             item_height,
-        });
+        };
+        let mut state = use_state(|| config);
+        if *state.peek() != config {
+            state.set(config);
+        }
+        use_provide_context(|| TreeConfigContext(state.into_readable()));
 
         let builder = self.builder.clone();
         rect()
-            .width(Size::fill())
-            .height(self.height.clone())
+            .layout(self.layout.clone())
+            .a11y_role(AccessibilityRole::Tree)
             .background(background)
             .color(color)
             .corner_radius(corner_radius)
             .child(
                 VirtualScrollView::new_with_data(self.builder_data.clone(), builder)
                     .scroll_controller(self.scroll_controller)
+                    .show_scrollbar(self.show_scrollbar)
+                    .scroll_with_arrows(self.scroll_with_arrows)
+                    .drag_scrolling(self.drag_scrolling)
+                    .scrollbar(self.scrollbar.clone())
                     .length(self.length)
                     .item_size(item_height)
                     // A tree scrolls on both axes — down its rows and across a long value — so a
