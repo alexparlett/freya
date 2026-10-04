@@ -3,12 +3,16 @@ use std::time::{
     Instant,
 };
 
-use freya_core::prelude::*;
+use freya_core::{
+    notify::Notify,
+    prelude::*,
+};
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct Timeout {
     elapsed: State<bool>,
     instant: State<Instant>,
+    reset: State<Notify>,
 }
 
 impl Timeout {
@@ -16,17 +20,30 @@ impl Timeout {
     pub fn create(duration: Duration) -> Self {
         let mut elapsed = State::create(false);
         let instant = State::create(Instant::now());
+        let reset = State::create(Notify::new());
 
+        // Sleeps until the latest reset's deadline, then until the next reset, so an idle
+        // timeout wakes nothing.
+        let notify = reset.peek().clone();
         spawn(async move {
             loop {
-                timer(duration).await;
-                if instant.read().elapsed() >= duration && !elapsed() {
-                    elapsed.set(true);
+                loop {
+                    let remaining = duration.saturating_sub(instant.peek().elapsed());
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    timer(remaining).await;
                 }
+                elapsed.set_if_modified(true);
+                notify.notified().await;
             }
         });
 
-        Timeout { elapsed, instant }
+        Timeout {
+            elapsed,
+            instant,
+            reset,
+        }
     }
 
     /// Check if the timeout has passed its specified [Duration].
@@ -38,6 +55,7 @@ impl Timeout {
     pub fn reset(&mut self) {
         self.instant.set_if_modified(Instant::now());
         self.elapsed.set_if_modified(false);
+        self.reset.peek().notify();
     }
 }
 
