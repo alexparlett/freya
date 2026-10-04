@@ -1,0 +1,36 @@
+[package]
+name = "freya-embed"
+version = "0.5.0-rc.8"
+description = "Freya driven by a host that owns the loop, the GL context and the input, such as a Wayland compositor"
+edition = "2024"
+license = "MIT"
+authors = ["Marc Espín <mespinsanz@gmail.com>", "Alex Parlett"]
+readme = "../../README.md"
+homepage = "https://freyaui.dev/"
+repository = "https://github.com/alexparlett/freya"
+keywords = ["gui", "embedded", "compositor"]
+categories = ["gui"]
+
+[lints]
+workspace = true
+
+[features]
+default = ["gl"]
+gl = ["freya-engine/gl"]
+
+[dependencies]
+freya-core = { workspace = true }
+freya-components = { workspace = true }
+freya-clipboard = { workspace = true }
+freya-engine = { workspace = true }
+torin = { workspace = true }
+ragnarok = { workspace = true }
+accesskit = { workspace = true }
+futures-channel = { workspace = true }
+futures-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+freya = { path = "../freya" }
+async-io = { workspace = true }
+accesskit = { workspace = true }

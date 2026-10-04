@@ -106,12 +106,8 @@ impl ReactiveContext {
     }
 
     pub fn run<T>(new_context: Self, run: impl FnOnce() -> T) -> T {
-        new_context.clear_subscriptions();
-        REACTIVE_CONTEXTS_STACK.with_borrow_mut(|context| context.push(new_context));
-        let res = run();
-        REACTIVE_CONTEXTS_STACK.with_borrow_mut(|context| context.pop());
-
-        res
+        let _pushed = Pushed::new(new_context);
+        run()
     }
 
     pub fn try_current() -> Option<Self> {
@@ -141,6 +137,25 @@ impl ReactiveContext {
         for subscription in self.inner.write().subscriptions.drain(..) {
             subscription.borrow_mut().remove(self);
         }
+    }
+}
+
+/// Keeps a reactive context on top of the stack until dropped, which happens even when the code
+/// under it unwinds, so a host that catches the panic does not run later code under a dead
+/// scope's context.
+struct Pushed;
+
+impl Pushed {
+    fn new(context: ReactiveContext) -> Self {
+        context.clear_subscriptions();
+        REACTIVE_CONTEXTS_STACK.with_borrow_mut(|stack| stack.push(context));
+        Pushed
+    }
+}
+
+impl Drop for Pushed {
+    fn drop(&mut self) {
+        REACTIVE_CONTEXTS_STACK.with_borrow_mut(|stack| stack.pop());
     }
 }
 
