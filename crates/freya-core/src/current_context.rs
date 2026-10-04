@@ -38,18 +38,16 @@ impl CurrentContext {
             context.replace(new_context);
             reactive_context
         });
-        let res = ReactiveContext::run(reactive_context, run);
-        CURRENT_CONTEXT.with_borrow_mut(|context| context.take());
-        res
+        let _clear = Clear;
+        ReactiveContext::run(reactive_context, run)
     }
 
     pub fn run<T>(new_context: Self, run: impl FnOnce() -> T) -> T {
         CURRENT_CONTEXT.with_borrow_mut(|context| {
             context.replace(new_context);
         });
-        let res = run();
-        CURRENT_CONTEXT.with_borrow_mut(|context| context.take());
-        res
+        let _clear = Clear;
+        run()
     }
 
     /// Run a closure using `scope_id` as the current scope, restoring the previous one afterwards.
@@ -62,17 +60,21 @@ impl CurrentContext {
                 .map(|context| std::mem::replace(&mut context.scope_id, scope_id))
         });
 
-        let res = run();
-
-        CURRENT_CONTEXT.with_borrow_mut(|context| {
-            if let Some(context) = context.as_mut()
-                && let Some(previous_scope_id) = previous_scope_id
-            {
-                context.scope_id = previous_scope_id;
+        struct Restore(Option<ScopeId>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                CURRENT_CONTEXT.with_borrow_mut(|context| {
+                    if let Some(context) = context.as_mut()
+                        && let Some(previous_scope_id) = self.0
+                    {
+                        context.scope_id = previous_scope_id;
+                    }
+                });
             }
-        });
+        }
 
-        res
+        let _restore = Restore(previous_scope_id);
+        run()
     }
 
     pub fn with<T>(with: impl FnOnce(&CurrentContext) -> T) -> T {
@@ -92,6 +94,16 @@ impl CurrentContext {
             })
             .ok()
             .flatten()
+    }
+}
+
+/// Clears the current context when dropped, which happens even when the closure it guards
+/// unwinds, so a host that catches the panic does not run later code under it.
+struct Clear;
+
+impl Drop for Clear {
+    fn drop(&mut self) {
+        CURRENT_CONTEXT.with_borrow_mut(|context| context.take());
     }
 }
 

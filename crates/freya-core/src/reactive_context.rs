@@ -106,12 +106,19 @@ impl ReactiveContext {
     }
 
     pub fn run<T>(new_context: Self, run: impl FnOnce() -> T) -> T {
+        // Pops even when `run` unwinds, so a host that catches the panic does not run later
+        // code under a dead scope's context.
+        struct Pop;
+        impl Drop for Pop {
+            fn drop(&mut self) {
+                REACTIVE_CONTEXTS_STACK.with_borrow_mut(|context| context.pop());
+            }
+        }
+
         new_context.clear_subscriptions();
         REACTIVE_CONTEXTS_STACK.with_borrow_mut(|context| context.push(new_context));
-        let res = run();
-        REACTIVE_CONTEXTS_STACK.with_borrow_mut(|context| context.pop());
-
-        res
+        let _pop = Pop;
+        run()
     }
 
     pub fn try_current() -> Option<Self> {
