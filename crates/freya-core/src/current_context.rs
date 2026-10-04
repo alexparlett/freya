@@ -29,24 +29,17 @@ pub struct CurrentContext {
 
 impl CurrentContext {
     pub fn run_with_reactive<T>(new_context: Self, run: impl FnOnce() -> T) -> T {
-        let reactive_context = CURRENT_CONTEXT.with_borrow_mut(|context| {
-            let reactive_context = {
-                let scope_storages = new_context.scopes_storages.borrow();
-                let scope_storage = scope_storages.get(&new_context.scope_id).unwrap();
-                scope_storage.reactive_context.clone()
-            };
-            context.replace(new_context);
-            reactive_context
-        });
-        let _clear = Clear;
+        let reactive_context = {
+            let scope_storages = new_context.scopes_storages.borrow();
+            let scope_storage = scope_storages.get(&new_context.scope_id).unwrap();
+            scope_storage.reactive_context.clone()
+        };
+        let _entered = Entered::new(new_context);
         ReactiveContext::run(reactive_context, run)
     }
 
     pub fn run<T>(new_context: Self, run: impl FnOnce() -> T) -> T {
-        CURRENT_CONTEXT.with_borrow_mut(|context| {
-            context.replace(new_context);
-        });
-        let _clear = Clear;
+        let _entered = Entered::new(new_context);
         run()
     }
 
@@ -54,26 +47,7 @@ impl CurrentContext {
     ///
     /// The closure still runs when there is no current context, just without any scope change.
     pub(crate) fn run_in_scope<T>(scope_id: ScopeId, run: impl FnOnce() -> T) -> T {
-        let previous_scope_id = CURRENT_CONTEXT.with_borrow_mut(|context| {
-            context
-                .as_mut()
-                .map(|context| std::mem::replace(&mut context.scope_id, scope_id))
-        });
-
-        struct Restore(Option<ScopeId>);
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                CURRENT_CONTEXT.with_borrow_mut(|context| {
-                    if let Some(context) = context.as_mut()
-                        && let Some(previous_scope_id) = self.0
-                    {
-                        context.scope_id = previous_scope_id;
-                    }
-                });
-            }
-        }
-
-        let _restore = Restore(previous_scope_id);
+        let _in_scope = InScope::new(scope_id);
         run()
     }
 
@@ -97,13 +71,45 @@ impl CurrentContext {
     }
 }
 
-/// Clears the current context when dropped, which happens even when the closure it guards
-/// unwinds, so a host that catches the panic does not run later code under it.
-struct Clear;
+/// Makes a context current until dropped, which happens even when the code under it unwinds,
+/// so a host that catches the panic does not run later code under it.
+struct Entered;
 
-impl Drop for Clear {
+impl Entered {
+    fn new(context: CurrentContext) -> Self {
+        CURRENT_CONTEXT.with_borrow_mut(|current| current.replace(context));
+        Entered
+    }
+}
+
+impl Drop for Entered {
     fn drop(&mut self) {
-        CURRENT_CONTEXT.with_borrow_mut(|context| context.take());
+        CURRENT_CONTEXT.with_borrow_mut(|current| current.take());
+    }
+}
+
+/// Makes a scope the current context's scope until dropped, then restores the one before it.
+struct InScope(Option<ScopeId>);
+
+impl InScope {
+    fn new(scope_id: ScopeId) -> Self {
+        InScope(CURRENT_CONTEXT.with_borrow_mut(|context| {
+            context
+                .as_mut()
+                .map(|context| std::mem::replace(&mut context.scope_id, scope_id))
+        }))
+    }
+}
+
+impl Drop for InScope {
+    fn drop(&mut self) {
+        CURRENT_CONTEXT.with_borrow_mut(|context| {
+            if let Some(context) = context.as_mut()
+                && let Some(previous_scope_id) = self.0
+            {
+                context.scope_id = previous_scope_id;
+            }
+        });
     }
 }
 
