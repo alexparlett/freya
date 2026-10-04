@@ -182,16 +182,21 @@ fn a_timer_wakes_the_host() {
         done = Some(runner.provide_root_context(|| State::create(false)));
     });
     let done = done.unwrap();
-    embedded.update(&mut fonts);
-    let before = wakes.0.load(Ordering::SeqCst);
+    // Counted from the waker's creation: on a busy machine the timer can fire before any line
+    // here runs. Update on each wake, as a host does, until the timer's task has run.
+    let mut seen = 0;
+    let mut redrew = false;
     let started = Instant::now();
-    while wakes.0.load(Ordering::SeqCst) == before {
-        assert!(started.elapsed() < Duration::from_secs(2), "never woken");
+    while !*done.peek() {
+        assert!(started.elapsed() < Duration::from_secs(5), "never woken");
+        let now = wakes.0.load(Ordering::SeqCst);
+        if now != seen {
+            seen = now;
+            redrew |= embedded.update(&mut fonts).redraw;
+        }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let update = embedded.update(&mut fonts);
-    assert!(*done.peek());
-    assert!(update.redraw);
+    assert!(redrew);
 }
 
 #[test]
