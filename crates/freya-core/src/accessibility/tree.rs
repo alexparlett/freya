@@ -58,6 +58,9 @@ pub struct AccessibilityTree {
     pub map: FxHashMap<AccessibilityId, NodeId>,
     // Current focused Accessibility Node.
     pub focused_id: AccessibilityId,
+    /// Whether [`AccessibilityTree::process_updates`] builds the changed nodes. Off, it keeps
+    /// only the id map and focus, for a host with no assistive technology listening.
+    pub export: bool,
 }
 
 impl Default for AccessibilityTree {
@@ -71,6 +74,7 @@ impl AccessibilityTree {
         Self {
             focused_id,
             map: FxHashMap::default(),
+            export: true,
         }
     }
 
@@ -163,7 +167,7 @@ impl AccessibilityTree {
 
         // Create the updated nodes
         let mut nodes = Vec::new();
-        for node_id in added_or_updated_ids {
+        for node_id in added_or_updated_ids.into_iter().filter(|_| self.export) {
             let accessibility_state = tree.accessibility_state.get(&node_id).unwrap();
             let layout_node = tree.layout.get(&node_id).unwrap();
             let accessibility_node = Self::create_node(node_id, layout_node, tree, title);

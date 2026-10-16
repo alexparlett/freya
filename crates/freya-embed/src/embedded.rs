@@ -522,6 +522,7 @@ impl Embedded {
     }
 
     fn process_accessibility(&mut self) -> accesskit::TreeUpdate {
+        self.accessibility.export = self.screen_reader.is_on();
         let update =
             self.accessibility
                 .process_updates(&mut self.tree, &self.events_sender, &self.name);
