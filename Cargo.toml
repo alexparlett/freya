@@ -173,7 +173,8 @@ ash = "^0.38"
 ash-window = "0.13.0"
 
 # Software rendering
-softbuffer = "0.4.8"
+# Unreleased: AlphaMode, which shm-based Wayland needs for a transparent window.
+softbuffer = { git = "https://github.com/rust-windowing/softbuffer", rev = "9a7c9ca" }
 
 # accessibility
 accesskit = "0.24.0"

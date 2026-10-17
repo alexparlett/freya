@@ -187,7 +187,7 @@ impl GraphicsDriver {
             }
         }
 
-        let driver = software::SoftwareDriver::from_window(window)
+        let driver = software::SoftwareDriver::from_window(window, transparent)
             .expect("Failed to initialize software renderer fallback");
         Self::Software(driver)
     }
