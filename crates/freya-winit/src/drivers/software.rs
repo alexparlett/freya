@@ -87,13 +87,12 @@ impl SoftwareDriver {
             .map_err(|err| format!("Could not create softbuffer surface: {err}"))?;
 
         // Skia draws premultiplied BGRA, which is what `Premultiplied` presents.
-        let alpha = if transparent
-            && surface.supports_alpha_mode(softbuffer::AlphaMode::Premultiplied)
-        {
-            softbuffer::AlphaMode::Premultiplied
-        } else {
-            softbuffer::AlphaMode::Ignored
-        };
+        let alpha =
+            if transparent && surface.supports_alpha_mode(softbuffer::AlphaMode::Premultiplied) {
+                softbuffer::AlphaMode::Premultiplied
+            } else {
+                softbuffer::AlphaMode::Ignored
+            };
 
         let size = window.inner_size();
         if let (Some(width), Some(height)) =
