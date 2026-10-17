@@ -1,0 +1,5 @@
+[advisories]
+# zip 4.6.1 comes only through ffmpeg-sidecar's `download_ffmpeg`, used by
+# freya-video's `ensure_ffmpeg` on non-Linux targets to unpack ffmpeg-sidecar's
+# own download. No ffmpeg-sidecar release takes zip 9 yet (2.6.0 is the latest).
+ignore = ["RUSTSEC-2026-0367", "RUSTSEC-2026-0368", "RUSTSEC-2026-0369"]

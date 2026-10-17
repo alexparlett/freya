@@ -55,6 +55,9 @@ impl HasWindowHandle for WindowHandleWrapper {
 pub struct SoftwareDriver {
     _context: softbuffer::Context<DisplayHandleWrapper>,
     surface: softbuffer::Surface<DisplayHandleWrapper, WindowHandleWrapper>,
+    /// How the buffer's alpha reaches the compositor: kept for a transparent window, else
+    /// ignored.
+    alpha: softbuffer::AlphaMode,
     #[cfg(target_os = "windows")]
     last_present: Option<Instant>,
 }
@@ -64,13 +67,17 @@ impl SoftwareDriver {
         event_loop: &ActiveEventLoop,
         window_attributes: WindowAttributes,
     ) -> Result<(Self, Window), Box<dyn std::error::Error>> {
+        let transparent = window_attributes.transparent;
         let window = event_loop.create_window(window_attributes)?;
-        let driver = Self::from_window(&window)?;
+        let driver = Self::from_window(&window, transparent)?;
         Ok((driver, window))
     }
 
     /// Build the driver on an existing window instead of creating a new one.
-    pub fn from_window(window: &Window) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn from_window(
+        window: &Window,
+        transparent: bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let display_handle = window.display_handle()?.as_raw();
         let window_handle = window.window_handle()?.as_raw();
 
@@ -79,18 +86,27 @@ impl SoftwareDriver {
         let mut surface = softbuffer::Surface::new(&context, WindowHandleWrapper(window_handle))
             .map_err(|err| format!("Could not create softbuffer surface: {err}"))?;
 
+        // Skia draws premultiplied BGRA, which is what `Premultiplied` presents.
+        let alpha =
+            if transparent && surface.supports_alpha_mode(softbuffer::AlphaMode::Premultiplied) {
+                softbuffer::AlphaMode::Premultiplied
+            } else {
+                softbuffer::AlphaMode::Ignored
+            };
+
         let size = window.inner_size();
         if let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         {
             surface
-                .resize(width, height)
+                .configure(width, height, alpha)
                 .map_err(|err| format!("Could not size softbuffer surface: {err}"))?;
         }
 
         Ok(Self {
             _context: context,
             surface,
+            alpha,
             #[cfg(target_os = "windows")]
             last_present: None,
         })
@@ -145,7 +161,7 @@ impl SoftwareDriver {
             return;
         };
 
-        let mut buffer = match self.surface.buffer_mut() {
+        let mut buffer = match self.surface.next_buffer() {
             Ok(buffer) => buffer,
             Err(err) => {
                 tracing::error!("Failed to acquire software buffer: {err:?}");
@@ -159,12 +175,8 @@ impl SoftwareDriver {
             AlphaType::Premul,
             None,
         );
-        let row_bytes = width.get() as usize * 4;
-        let pixels: &mut [u32] = &mut buffer;
-        // SAFETY: u32 is 4-aligned and we own the buffer for the full borrow.
-        let bytes: &mut [u8] = unsafe {
-            std::slice::from_raw_parts_mut(pixels.as_mut_ptr() as *mut u8, pixels.len() * 4)
-        };
+        let row_bytes = buffer.byte_stride().get() as usize;
+        let bytes = buffer.data_u8();
 
         match wrap_software_pixels(&info, bytes, row_bytes) {
             Some(mut wrapped_surface) => render(&mut wrapped_surface),
@@ -186,7 +198,7 @@ impl SoftwareDriver {
         else {
             return;
         };
-        if let Err(err) = self.surface.resize(width, height) {
+        if let Err(err) = self.surface.configure(width, height, self.alpha) {
             tracing::error!("Failed to resize software surface: {err:?}");
         }
     }
