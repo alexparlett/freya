@@ -143,10 +143,17 @@ impl BrowserState {
             other => MouseButton::Other(other),
         };
 
+        let mut modifiers = Modifiers::empty();
+        modifiers.set(Modifiers::CONTROL, event.ctrl_key);
+        modifiers.set(Modifiers::SHIFT, event.shift_key);
+        modifiers.set(Modifiers::ALT, event.alt_key);
+        modifiers.set(Modifiers::META, event.meta_key);
+
         Self::push(PlatformEvent::Mouse {
             name,
             cursor,
             button: (name != MouseEventName::MouseMove).then_some(button),
+            modifiers,
         });
 
         false

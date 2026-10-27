@@ -218,6 +218,7 @@ fn pointer_events() {
         name: MouseEventName::MouseDown,
         cursor: (15., 15.).into(),
         button: None,
+        modifiers: Modifiers::empty(),
     });
     test.sync_and_update();
 
@@ -238,6 +239,7 @@ fn pointer_events() {
         name: MouseEventName::MouseUp,
         cursor: (15., 15.).into(),
         button: None,
+        modifiers: Modifiers::empty(),
     });
     test.sync_and_update();
 
@@ -551,4 +553,33 @@ fn cursor_property() {
     test.move_cursor((50., 150.));
     test.sync_and_update();
     assert_eq!(test.cursor_icon(), CursorIcon::default());
+}
+
+#[test]
+fn a_mouse_press_carries_the_modifiers_held() {
+    fn app() -> Element {
+        let mut state = use_consume::<State<Modifiers>>();
+        rect()
+            .expanded()
+            .on_mouse_down(move |e: Event<MouseEventData>| state.set(e.modifiers))
+            .into()
+    }
+
+    let (mut test, state) = TestingRunner::new(
+        app,
+        (500., 500.).into(),
+        |runner| runner.provide_root_context(|| State::create(Modifiers::empty())),
+        1.,
+    );
+    test.sync_and_update();
+
+    test.send_event(PlatformEvent::Mouse {
+        name: MouseEventName::MouseDown,
+        cursor: (15., 15.).into(),
+        button: Some(MouseButton::Left),
+        modifiers: Modifiers::META | Modifiers::SHIFT,
+    });
+    test.sync_and_update();
+
+    assert_eq!(*state.peek(), Modifiers::META | Modifiers::SHIFT);
 }

@@ -1069,6 +1069,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                         name: MouseEventName::MouseMove,
                                         cursor: app.position,
                                         button: None,
+                                        modifiers: winit_mappings::map_winit_modifiers(app.modifiers_state),
                                     }],
                                     &mut self.plugins,
                                     PluginHandle::new(&self.proxy),
@@ -1277,6 +1278,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                             name,
                             cursor: (app.position.x, app.position.y).into(),
                             button: Some(map_winit_mouse_button(button)),
+                            modifiers: winit_mappings::map_winit_modifiers(app.modifiers_state),
                         }],
                         &mut self.plugins,
                         PluginHandle::new(&self.proxy),
@@ -1299,12 +1301,21 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     };
                     let key = winit_mappings::map_winit_key(&event.logical_key);
                     let code = winit_mappings::map_winit_physical_key(&event.physical_key);
-                    let modifiers = winit_mappings::map_winit_modifiers(app.modifiers_state);
-
                     app.pressed_keys
                         .retain(|(_, pressed_code)| *pressed_code != code);
                     if event.state.is_pressed() {
                         app.pressed_keys.push((key.clone(), code));
+                    }
+
+                    // A modifier key's own event carries the state from before it: Wayland
+                    // reports the new modifiers after the key. Fold the key into them here.
+                    let mut modifiers = winit_mappings::map_winit_modifiers(app.modifiers_state);
+                    if let Some(own) = winit_mappings::modifier_of(&key) {
+                        let still_held = app
+                            .pressed_keys
+                            .iter()
+                            .any(|(held, _)| winit_mappings::modifier_of(held) == Some(own));
+                        modifiers.set(own, still_held);
                     }
 
                     self.plugins.send(
@@ -1384,6 +1395,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                         name: MouseEventName::MouseMove,
                         cursor: app.position,
                         button: None,
+                        modifiers: winit_mappings::map_winit_modifiers(app.modifiers_state),
                     }];
 
                     if !app.dropped_file_paths.is_empty() {

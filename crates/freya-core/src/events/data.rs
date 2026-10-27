@@ -35,6 +35,8 @@ pub struct MouseEventData {
     pub global_location: CursorPoint,
     pub element_location: CursorPoint,
     pub button: Option<MouseButton>,
+    /// The modifier keys held as the event happened, as a click is read with them.
+    pub modifiers: keyboard_types::Modifiers,
 }
 
 /// Data of a Keyboard event.

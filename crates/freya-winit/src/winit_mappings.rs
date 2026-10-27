@@ -24,6 +24,17 @@ pub fn map_winit_mouse_button(event: winit::event::MouseButton) -> MouseButton {
 }
 
 // Return the equivalent of Winit `ModifiersState` in keyboard_types
+/// The modifier a key is, if it is one.
+pub fn modifier_of(key: &Key) -> Option<Modifiers> {
+    match key {
+        Key::Named(NamedKey::Alt | NamedKey::AltGraph) => Some(Modifiers::ALT),
+        Key::Named(NamedKey::Control) => Some(Modifiers::CONTROL),
+        Key::Named(NamedKey::Shift) => Some(Modifiers::SHIFT),
+        Key::Named(NamedKey::Meta) => Some(Modifiers::META),
+        _ => None,
+    }
+}
+
 pub fn map_winit_modifiers(modifiers: winit::keyboard::ModifiersState) -> Modifiers {
     let mut new_modifiers = Modifiers::empty();
     if modifiers.alt_key() {

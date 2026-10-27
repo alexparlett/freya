@@ -50,12 +50,14 @@ fn click_without_settling(test: &mut TestingRunner, point: (f64, f64)) {
         name: MouseEventName::MouseDown,
         cursor: point.into(),
         button: Some(MouseButton::Left),
+        modifiers: Modifiers::empty(),
     });
     test.process_events_and_layout();
     test.send_event(PlatformEvent::Mouse {
         name: MouseEventName::MouseUp,
         cursor: point.into(),
         button: Some(MouseButton::Left),
+        modifiers: Modifiers::empty(),
     });
     test.process_events_and_layout();
 }

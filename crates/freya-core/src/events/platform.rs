@@ -94,6 +94,8 @@ pub enum PlatformEvent {
         name: MouseEventName,
         cursor: CursorPoint,
         button: Option<MouseButton>,
+        /// The modifier keys held as the event happened.
+        modifiers: keyboard_types::Modifiers,
     },
     /// The pointer exited the window at its last known position.
     PointerExit { cursor: CursorPoint },

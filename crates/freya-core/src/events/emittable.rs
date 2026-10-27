@@ -83,6 +83,7 @@ impl EmmitableEvent {
                     name: MouseEventName::MouseMove,
                     cursor,
                     button: None,
+                    modifiers: keyboard_types::Modifiers::empty(),
                 },
                 node_area,
                 scale_factor,
@@ -91,7 +92,7 @@ impl EmmitableEvent {
                 name: platform_event_name,
                 cursor,
                 button,
-                ..
+                modifiers,
             } if name.is_enter()
                 || name.is_left()
                 || name.is_press()
@@ -109,6 +110,7 @@ impl EmmitableEvent {
                     global_location,
                     element_location: CursorPoint::new(element_x, element_y),
                     button,
+                    modifiers,
                 }));
 
                 Self {
@@ -159,7 +161,7 @@ impl EmmitableEvent {
                 name: platform_event_name,
                 cursor,
                 button,
-                ..
+                modifiers,
             } => {
                 let global_location = cursor / scale_factor;
                 let element_x =
@@ -171,6 +173,7 @@ impl EmmitableEvent {
                     global_location,
                     element_location: CursorPoint::new(element_x, element_y),
                     button,
+                    modifiers,
                 });
 
                 Self {
