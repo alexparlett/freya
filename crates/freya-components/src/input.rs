@@ -190,6 +190,7 @@ pub struct Input {
     mode: InputMode,
     auto_focus: bool,
     select_all_on_init: bool,
+    select_on_init: Option<(usize, usize)>,
     caret: Option<Writable<usize>>,
     width: Size,
     height: Size,
@@ -225,6 +226,7 @@ impl Input {
             mode: InputMode::default(),
             auto_focus: false,
             select_all_on_init: false,
+            select_on_init: None,
             caret: None,
             width: Size::px(150.),
             height: Size::Inner,
@@ -297,6 +299,14 @@ impl Input {
     /// syncs as a plain edit, cursor and selection untouched.
     pub fn select_all_on_init(mut self, select_all_on_init: bool) -> Self {
         self.select_all_on_init = select_all_on_init;
+        self
+    }
+
+    /// Start with the characters `range` of the value selected: a file's name without its
+    /// extension, so typing replaces the name and keeps the extension. Counted in chars; takes
+    /// precedence over [`select_all_on_init`](Self::select_all_on_init).
+    pub fn select_on_init(mut self, range: std::ops::Range<usize>) -> Self {
+        self.select_on_init = Some((range.start, range.end));
         self
     }
 
@@ -478,10 +488,14 @@ impl Component for Input {
         let mut editable = use_editable(
             || self.value.read().to_string(),
             move || {
-                EditableConfig::new()
+                let config = EditableConfig::new()
                     .with_allow_write_clipboard(!is_masked)
                     .with_select_all_on_double_click(is_masked)
-                    .with_select_all_on_init(self.select_all_on_init)
+                    .with_select_all_on_init(self.select_all_on_init);
+                match self.select_on_init {
+                    Some((start, end)) => config.with_select_on_init(start, end),
+                    None => config,
+                }
             },
         );
         let mut is_dragging = use_state(|| false);

@@ -24,8 +24,13 @@ impl UseEditable {
     pub fn create(content: String, config: EditableConfig) -> Self {
         // Selection positions are UTF-16 code units, which is what `encode_utf16().count()`
         // gives — the same measure `Rope::len_utf16_cu` reports once the rope is built.
-        let selection = match config.select_all_on_init {
-            true if !content.is_empty() => {
+        let utf16 =
+            |chars: usize| -> usize { content.chars().take(chars).map(char::len_utf16).sum() };
+        let selection = match (config.select_on_init, config.select_all_on_init) {
+            (Some((start, end)), _) => {
+                TextSelection::new_range((utf16(start), utf16(end.max(start))))
+            }
+            (None, true) if !content.is_empty() => {
                 TextSelection::new_range((0, content.encode_utf16().count()))
             }
             _ => TextSelection::new_cursor(0),
