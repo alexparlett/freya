@@ -583,3 +583,55 @@ fn a_mouse_press_carries_the_modifiers_held() {
 
     assert_eq!(*state.peek(), Modifiers::META | Modifiers::SHIFT);
 }
+
+#[test]
+fn state_made_in_another_scope_lives_with_that_scope() {
+    #[derive(Clone, Copy)]
+    struct Kept(State<Option<State<i32>>>);
+
+    #[derive(PartialEq)]
+    struct Child;
+
+    impl Component for Child {
+        fn render(&self) -> impl IntoElement {
+            let kept = use_consume::<Kept>();
+            let root = use_consume::<ScopeId>();
+            rect().expanded().on_mouse_down(move |_| {
+                let mut kept = kept.0;
+                kept.set(Some(run_in_scope(root, || State::create(7))));
+            })
+        }
+    }
+
+    fn app() -> Element {
+        let shown = use_consume::<State<bool>>();
+        use_provide_context(current_scope_id);
+        rect().expanded().maybe_child(shown().then(|| Child.into_element())).into()
+    }
+
+    let (mut test, (shown, kept)) = TestingRunner::new(
+        app,
+        (500., 500.).into(),
+        |runner| {
+            let shown = runner.provide_root_context(|| State::create(true));
+            let kept = runner.provide_root_context(|| Kept(State::create(None)));
+            (shown, kept)
+        },
+        1.,
+    );
+    test.sync_and_update();
+    test.send_event(PlatformEvent::Mouse {
+        name: MouseEventName::MouseDown,
+        cursor: (15., 15.).into(),
+        button: Some(MouseButton::Left),
+        modifiers: Modifiers::empty(),
+    });
+    test.sync_and_update();
+
+    // The child goes; what it made in the root's scope stays readable.
+    let mut shown = shown;
+    shown.set(false);
+    test.sync_and_update();
+    let made = kept.0.peek().expect("made on the press");
+    assert_eq!(*made.peek(), 7);
+}

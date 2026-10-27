@@ -131,6 +131,15 @@ pub fn current_scope_id() -> ScopeId {
     CurrentContext::with(|context| context.scope_id)
 }
 
+/// Runs `run` as if inside `scope_id`, so the [`State`](crate::prelude::State)s and tasks it
+/// makes belong to that scope and live as long as it, not the scope the caller is in.
+///
+/// An event handler runs in the scope of the element that fired it; something it makes for a
+/// longer-lived owner, such as a window's tab made from a list row's click, must be made here.
+pub fn run_in_scope<T>(scope_id: ScopeId, run: impl FnOnce() -> T) -> T {
+    CurrentContext::run_in_scope(scope_id, run)
+}
+
 pub fn mark_scope_as_dirty(scope_id: ScopeId) {
     CurrentContext::with(|context| {
         context
