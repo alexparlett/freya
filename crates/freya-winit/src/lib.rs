@@ -228,5 +228,8 @@ fn launch_inner(mut launch_config: LaunchConfig) {
         }));
     }
 
-    event_loop.run_app(&mut renderer).unwrap();
+    // The loop ends in an error when the display goes away, as at the end of a session.
+    if let Err(err) = event_loop.run_app(&mut renderer) {
+        tracing::warn!("event loop ended: {err}");
+    }
 }
