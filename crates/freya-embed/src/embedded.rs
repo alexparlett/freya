@@ -210,6 +210,7 @@ impl Embedded {
                 name,
                 cursor: at.into(),
                 button: Some(MouseButton::Left),
+                modifiers: freya_core::prelude::Modifiers::empty(),
             });
         }
     }

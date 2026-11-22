@@ -595,6 +595,29 @@ pub fn input_select_all_on_init_test() {
 }
 
 #[test]
+pub fn input_select_on_init_selects_only_that_range() {
+    fn rename_app() -> impl IntoElement {
+        let value = use_state(|| "café notes.md".to_string());
+
+        rect()
+            .child(Input::new(value).auto_focus(true).select_on_init(0..10))
+            .child(format!("value={}", value.read()))
+    }
+
+    let mut test = launch_test(rename_app);
+
+    test.sync_and_update();
+
+    // The name is replaced and the extension kept, the é counted as one char.
+    test.write_text("plan");
+
+    let label = test.find(|_, element| {
+        Label::try_downcast(element).filter(|label| label.text.as_ref() == "value=plan.md")
+    });
+    assert!(label.is_some(), "typing replaced only the selected name");
+}
+
+#[test]
 pub fn input_without_select_all_on_init_keeps_the_cursor_at_the_start() {
     fn seeded_app() -> impl IntoElement {
         let value = use_state(|| "old name".to_string());

@@ -16,6 +16,7 @@ pub struct EditableConfig {
     pub(crate) allow_write_clipboard: bool,
     pub(crate) select_all_on_double_click: bool,
     pub(crate) select_all_on_init: bool,
+    pub(crate) select_on_init: Option<(usize, usize)>,
 }
 
 impl Default for EditableConfig {
@@ -35,6 +36,7 @@ impl EditableConfig {
             allow_write_clipboard: true,
             select_all_on_double_click: false,
             select_all_on_init: false,
+            select_on_init: None,
         }
     }
 
@@ -83,6 +85,14 @@ impl EditableConfig {
     /// the very text being renamed.
     pub fn with_select_all_on_init(mut self, select_all_on_init: bool) -> Self {
         self.select_all_on_init = select_all_on_init;
+        self
+    }
+
+    /// Start with the characters `start..end` selected: a file's name without its extension,
+    /// as a rename opens. Counted in chars and clamped to the content; takes precedence over
+    /// [`with_select_all_on_init`](Self::with_select_all_on_init).
+    pub fn with_select_on_init(mut self, start: usize, end: usize) -> Self {
+        self.select_on_init = Some((start, end));
         self
     }
 }

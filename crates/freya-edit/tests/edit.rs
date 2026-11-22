@@ -279,6 +279,7 @@ fn highlight_multiple_lines_single_editor() {
         name: MouseEventName::MouseDown,
         cursor: (35.0, 3.0).into(),
         button: Some(MouseButton::Left),
+        modifiers: Modifiers::empty(),
     });
     utils.sync_and_update();
     utils.move_cursor((80.0, 25.0));
@@ -286,6 +287,7 @@ fn highlight_multiple_lines_single_editor() {
         name: MouseEventName::MouseUp,
         cursor: (80.0, 25.0).into(),
         button: Some(MouseButton::Left),
+        modifiers: Modifiers::empty(),
     });
     utils.sync_and_update();
 
@@ -338,6 +340,7 @@ fn drag_after_drag_is_not_a_multi_press() {
         name: MouseEventName::MouseDown,
         cursor: (35.0, 3.0).into(),
         button: Some(MouseButton::Left),
+        modifiers: Modifiers::empty(),
     });
     utils.sync_and_update();
     utils.move_cursor((80.0, 3.0));
@@ -345,6 +348,7 @@ fn drag_after_drag_is_not_a_multi_press() {
         name: MouseEventName::MouseUp,
         cursor: (80.0, 3.0).into(),
         button: Some(MouseButton::Left),
+        modifiers: Modifiers::empty(),
     });
     utils.sync_and_update();
 
@@ -356,6 +360,7 @@ fn drag_after_drag_is_not_a_multi_press() {
         name: MouseEventName::MouseDown,
         cursor: (35.0, 3.0).into(),
         button: Some(MouseButton::Left),
+        modifiers: Modifiers::empty(),
     });
     utils.sync_and_update();
 

@@ -22,6 +22,7 @@ fn right_button(test: &mut TestingRunner, name: MouseEventName, cursor: (f64, f6
         name,
         cursor: cursor.into(),
         button: Some(MouseButton::Right),
+        modifiers: Modifiers::empty(),
     });
 }
 

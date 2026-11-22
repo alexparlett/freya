@@ -446,6 +446,7 @@ impl TestingRunner {
             name: MouseEventName::MouseMove,
             cursor: cursor.into(),
             button: Some(MouseButton::Left),
+            modifiers: Modifiers::empty(),
         });
         self.sync_and_update();
     }
@@ -483,6 +484,7 @@ impl TestingRunner {
             name: MouseEventName::MouseDown,
             cursor,
             button: Some(MouseButton::Left),
+            modifiers: Modifiers::empty(),
         });
         self.sync_and_update();
     }
@@ -493,6 +495,7 @@ impl TestingRunner {
             name: MouseEventName::MouseUp,
             cursor,
             button: Some(MouseButton::Left),
+            modifiers: Modifiers::empty(),
         });
         self.sync_and_update();
     }
@@ -503,12 +506,14 @@ impl TestingRunner {
             name: MouseEventName::MouseDown,
             cursor,
             button: Some(MouseButton::Left),
+            modifiers: Modifiers::empty(),
         });
         self.sync_and_update();
         self.send_event(PlatformEvent::Mouse {
             name: MouseEventName::MouseUp,
             cursor,
             button: Some(MouseButton::Left),
+            modifiers: Modifiers::empty(),
         });
         self.sync_and_update();
     }
@@ -598,6 +603,7 @@ impl TestingRunner {
             name: MouseEventName::MouseMove,
             cursor,
             button: None,
+            modifiers: Modifiers::empty(),
         });
         self.sync_and_update();
     }
