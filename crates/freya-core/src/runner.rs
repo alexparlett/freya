@@ -185,6 +185,10 @@ pub struct Runner {
 
     pub(crate) sender: futures_channel::mpsc::UnboundedSender<Message>,
     pub(crate) receiver: futures_channel::mpsc::UnboundedReceiver<Message>,
+
+    /// Moves of components added in this update, by parent node, index and scope: their
+    /// root node is known once their scope has run.
+    pub(crate) pending_moves: Vec<(NodeId, u32, ScopeId)>,
 }
 
 impl Debug for Runner {
@@ -285,6 +289,7 @@ impl Runner {
 
             sender,
             receiver,
+            pending_moves: Vec::new(),
         }
     }
 
@@ -796,6 +801,17 @@ impl Runner {
             scope_storage.current_run += 1;
 
             scope_rc.borrow_mut().element = Some(path_element);
+        }
+
+        for (parent, index, scope_id) in std::mem::take(&mut self.pending_moves) {
+            if self.scopes.contains_key(&scope_id) {
+                let node_id = self.find_scope_root_node_id(scope_id);
+                mutations
+                    .moved
+                    .entry(parent)
+                    .or_default()
+                    .push(MutationMove { index, node_id });
+            }
         }
 
         mutations
@@ -1383,31 +1399,60 @@ impl Runner {
             parents_to_resync_scopes.insert(parent.clone());
 
             let (parent_node_id, paths) = moved_nodes.get_mut(&parent).unwrap();
+            let parent_node_id = *parent_node_id;
 
-            for (from, to) in movements.into_iter().sorted_by_key(|e| e.1) {
-                let path_node = paths.remove(&from).unwrap();
+            // Where the moved and the added children end; unmoved ones keep their index.
+            let mut destinations = movements
+                .iter()
+                .map(|(from, to)| (paths.remove(from).unwrap().node_id, *to))
+                .collect::<FxHashMap<NodeId, u32>>();
+            for added in diff
+                .added
+                .iter()
+                .filter(|a| a.len() == parent.len() + 1 && a.starts_with(&parent))
+            {
+                if let Some((node_id, _)) = addition_parents.get(added) {
+                    destinations.insert(*node_id, added[added.len() - 1]);
+                }
+            }
+            let mut children = Vec::new();
+            scope
+                .borrow()
+                .nodes
+                .traverse_1_level(&parent, |_, path_node| children.push(path_node.clone()));
+            let targets = final_indices(&children, &destinations);
+            if targets.iter().enumerate().all(|(i, to)| i as u32 == *to) {
+                continue;
+            }
 
+            // The children outside the longest run already in final order are lifted out,
+            // then put back in order of destination. Placing moved children one by one would
+            // shift unmoved siblings that sit between moved ones not placed yet.
+            let kept = longest_ordered_run(&targets);
+            let mut lifted = Vec::new();
+            for (i, path_node) in children.into_iter().enumerate().rev() {
+                if kept[i] {
+                    continue;
+                }
+                let mut from_path = parent.to_vec();
+                from_path.push(i as u32);
+                let path_entry = scope.borrow_mut().nodes.remove(&from_path).unwrap();
+                lifted.push((targets[i], path_node, path_entry));
+            }
+            lifted.sort_by_key(|(to, ..)| *to);
+
+            for (to, path_node, path_entry) in lifted {
                 let PathNode { node_id, scope_id } = path_node;
-
-                // Search for this moved node current position
-                let from_path = scope
-                    .borrow()
-                    .nodes
-                    .find_child_path(&parent, |v| v == Some(&path_node))
-                    .unwrap();
 
                 let mut to_path = parent.to_vec();
                 to_path.push(to);
-
-                if from_path == to_path {
-                    continue;
-                }
-
-                // Remove the node from the old position and add it to the new one
-                let path_entry = scope.borrow_mut().nodes.remove(&from_path).unwrap();
                 scope.borrow_mut().nodes.insert_entry(&to_path, path_entry);
 
-                if let Some(scope_id) = scope_id {
+                if let Some(scope_id) = scope_id
+                    && !self.scopes.contains_key(&scope_id)
+                {
+                    self.pending_moves.push((parent_node_id, to, scope_id));
+                } else if let Some(scope_id) = scope_id {
                     let scope_root_node_id = self.find_scope_root_node_id(scope_id);
                     let scope_rc = self.scopes.get(&scope_id).cloned().unwrap();
                     let scope = scope_rc.borrow();
@@ -1425,7 +1470,7 @@ impl Runner {
                     // Mark the element as moved
                     mutations
                         .moved
-                        .entry(*parent_node_id)
+                        .entry(parent_node_id)
                         .or_default()
                         .push(MutationMove { index: to, node_id });
                 }
@@ -1550,6 +1595,49 @@ fn resolve_old_path(new_path: &[u32], moved: &FxHashMap<Box<[u32]>, Vec<(u32, u3
         old_path.push(new_index);
     }
     old_path
+}
+
+/// Each child's index once the moves are done: a moved or added child's destination, the
+/// unmoved ones taking the free indices in the order they stand.
+fn final_indices(children: &[PathNode], destinations: &FxHashMap<NodeId, u32>) -> Vec<u32> {
+    let taken = destinations.values().copied().collect::<FxHashSet<u32>>();
+    let mut free = (0..children.len() as u32).filter(|i| !taken.contains(i));
+    children
+        .iter()
+        .map(|child| match destinations.get(&child.node_id) {
+            Some(to) => *to,
+            None => free.next().unwrap(),
+        })
+        .collect()
+}
+
+/// Marks the longest run of `targets` that is already increasing, preferring earlier
+/// entries on a tie, so those stay put and only the rest move.
+fn longest_ordered_run(targets: &[u32]) -> Vec<bool> {
+    // An increasing run read forwards is a decreasing one read backwards; scanning backwards
+    // makes ties keep the earlier entries.
+    let len = targets.len();
+    let mut tails: Vec<usize> = Vec::new();
+    let mut previous = vec![usize::MAX; len];
+    for back in 0..len {
+        let value = targets[len - 1 - back];
+        let at = tails.partition_point(|&t| targets[len - 1 - t] > value);
+        if at > 0 {
+            previous[back] = tails[at - 1];
+        }
+        if at == tails.len() {
+            tails.push(back);
+        } else {
+            tails[at] = back;
+        }
+    }
+    let mut kept = vec![false; len];
+    let mut at = tails.last().copied().unwrap_or(usize::MAX);
+    while at != usize::MAX {
+        kept[len - 1 - at] = true;
+        at = previous[at];
+    }
+    kept
 }
 
 fn is_descendant(candidate: &[u32], ancestor: &[u32]) -> bool {
