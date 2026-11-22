@@ -424,11 +424,16 @@ impl Tree {
 
             for (parent_node_id, movements) in mutations.moved {
                 let parent = self.children.get_mut(&parent_node_id).unwrap();
-                for MutationMove { index: to, node_id } in
-                    movements.into_iter().sorted_by_key(|m| m.index)
-                {
-                    let from = parent.iter().position(|id| *id == node_id).unwrap();
+                // Lifted out first, then put back in order, as the runner moves its nodes.
+                let movements = movements
+                    .into_iter()
+                    .sorted_by_key(|m| m.index)
+                    .collect::<Vec<_>>();
+                for MutationMove { node_id, .. } in &movements {
+                    let from = parent.iter().position(|id| id == node_id).unwrap();
                     parent.remove(from);
+                }
+                for MutationMove { index: to, node_id } in movements {
                     parent.insert(to as usize, node_id);
                 }
                 let mut diff = DiffModifies::empty();

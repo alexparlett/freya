@@ -73,18 +73,20 @@ impl CurrentContext {
 
 /// Makes a context current until dropped, which happens even when the code under it unwinds,
 /// so a host that catches the panic does not run later code under it.
-struct Entered;
+/// Makes a context current until dropped, then restores the one before it, so a runner can
+/// run inside another's render.
+struct Entered(Option<CurrentContext>);
 
 impl Entered {
     fn new(context: CurrentContext) -> Self {
-        CURRENT_CONTEXT.with_borrow_mut(|current| current.replace(context));
-        Entered
+        Entered(CURRENT_CONTEXT.with_borrow_mut(|current| current.replace(context)))
     }
 }
 
 impl Drop for Entered {
     fn drop(&mut self) {
-        CURRENT_CONTEXT.with_borrow_mut(|current| current.take());
+        let previous = self.0.take();
+        CURRENT_CONTEXT.with_borrow_mut(|current| *current = previous);
     }
 }
 
