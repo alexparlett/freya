@@ -108,7 +108,7 @@ pub(crate) struct TrafficLights {
 impl TrafficLights {
     /// Resolve the `NSWindow` behind a winit [`Window`] and apply the inset.
     /// Returns `None` off the main thread or when the handle is not AppKit.
-    pub(crate) fn attach(window: &Window, inset: (f64, f64)) -> Option<Self> {
+    pub(crate) fn attach(window: &dyn Window, inset: (f64, f64)) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
             return None;

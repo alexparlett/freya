@@ -93,7 +93,7 @@ impl RouterContextInner {
 /// let router = RouterContext::get();
 /// Button::new()
 ///     .on_press(move |_| {
-///         let _ = router.replace(Route::Settings);
+///         router.replace(Route::Settings);
 ///     })
 ///     .child("Settings")
 /// #     }
@@ -131,8 +131,7 @@ impl RouterContext {
 
     /// Creates a router context that lives for the application lifetime.
     ///
-    /// This is useful for sharing router state across multiple windows. Provide it
-    /// to each window with [`use_share_router`](crate::components::use_share_router).
+    /// Provide it to each window with `WindowConfig::with_root_context`.
     ///
     /// This is **not** a hook, do not use it inside components like you would [`use_route`](crate::hooks::use_route).
     /// You would usually want to call this in your `main` function, not anywhere else.
@@ -148,7 +147,7 @@ impl RouterContext {
     ///
     ///     launch(
     ///         LaunchConfig::new()
-    ///             .with_window(WindowConfig::new_app(MyApp { router })),
+    ///             .with_window(WindowConfig::new(app).with_root_context(router)),
     ///     );
     /// }
     /// ```
@@ -221,8 +220,13 @@ impl RouterContext {
     /// Pushes a location onto the navigation history.
     ///
     /// Pass a route variant for an internal destination.
-    /// External URLs return [`ExternalNavigationFailure`].
-    pub fn push(
+    /// Ignores external navigation failures. Use [`Self::try_push`] to handle them.
+    pub fn push(&self, target: impl Into<NavigationTarget>) {
+        let _ = self.try_push(target);
+    }
+
+    /// Pushes a location onto the navigation history, returning external navigation failures.
+    pub fn try_push(
         &self,
         target: impl Into<NavigationTarget>,
     ) -> Result<(), ExternalNavigationFailure> {
@@ -241,8 +245,13 @@ impl RouterContext {
 
     /// Replaces the current location without adding a history entry.
     ///
-    /// External URLs return [`ExternalNavigationFailure`].
-    pub fn replace(
+    /// Ignores external navigation failures. Use [`Self::try_replace`] to handle them.
+    pub fn replace(&self, target: impl Into<NavigationTarget>) {
+        let _ = self.try_replace(target);
+    }
+
+    /// Replaces the current location, returning external navigation failures.
+    pub fn try_replace(
         &self,
         target: impl Into<NavigationTarget>,
     ) -> Result<(), ExternalNavigationFailure> {
@@ -348,19 +357,32 @@ where
     /// Pushes a location onto the navigation history.
     ///
     /// The previous location becomes available through [`Self::go_back`].
-    pub fn push(
+    /// Ignores external navigation failures. Use [`Self::try_push`] to handle them.
+    pub fn push(&self, target: impl Into<NavigationTarget<R>>) {
+        self.inner.push(target.into());
+    }
+
+    /// Pushes a location onto the navigation history, returning external navigation failures.
+    pub fn try_push(
         &self,
         target: impl Into<NavigationTarget<R>>,
     ) -> Result<(), ExternalNavigationFailure> {
-        self.inner.push(target.into())
+        self.inner.try_push(target.into())
     }
 
     /// Replaces the current location without adding a history entry.
-    pub fn replace(
+    ///
+    /// Ignores external navigation failures. Use [`Self::try_replace`] to handle them.
+    pub fn replace(&self, target: impl Into<NavigationTarget<R>>) {
+        self.inner.replace(target.into());
+    }
+
+    /// Replaces the current location, returning external navigation failures.
+    pub fn try_replace(
         &self,
         target: impl Into<NavigationTarget<R>>,
     ) -> Result<(), ExternalNavigationFailure> {
-        self.inner.replace(target.into())
+        self.inner.try_replace(target.into())
     }
 
     /// Returns the active route.

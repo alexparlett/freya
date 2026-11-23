@@ -287,9 +287,7 @@ impl TextEditor for RopeEditor {
     fn set(&mut self, text: &str) {
         self.rope.remove(0..);
         self.rope.insert(0, text);
-        if self.cursor_pos() > text.len() {
-            self.move_cursor_to(text.len());
-        }
+        self.selection.clamp(&self.rope);
     }
 
     fn clear_selection(&mut self) {
@@ -402,16 +400,7 @@ mod test {
     }
 
     fn press_with(ed: &mut RopeEditor, key: NamedKey, modifiers: Modifiers) {
-        ed.process_key(
-            &Key::Named(key),
-            &modifiers,
-            None,
-            None,
-            true,
-            true,
-            false,
-            false,
-        );
+        ed.process_key(&Key::Named(key), &modifiers, None, None, true, true, false);
     }
 
     /// Put the caret at `pos` with nothing selected. `move_cursor_to` alone only moves

@@ -129,25 +129,25 @@ impl From<Html> for Element {
         Element::Element {
             key: DiffKey::None,
             element: Rc::new(value.element),
-            elements: vec![],
+            elements: vec![].into(),
         }
     }
 }
 
 impl LayoutExt for Html {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.element.layout
     }
 }
 
 impl AccessibilityExt for Html {
-    fn get_accessibility_data(&mut self) -> &mut AccessibilityData {
+    fn accessibility_data_mut(&mut self) -> &mut AccessibilityData {
         &mut self.element.accessibility
     }
 }
 
 impl EventHandlersExt for Html {
-    fn get_event_handlers(&mut self) -> &mut FxHashMap<EventName, EventHandlerType> {
+    fn event_handlers_mut(&mut self) -> &mut FxHashMap<EventName, EventHandlerType> {
         &mut self.element.event_handlers
     }
 }

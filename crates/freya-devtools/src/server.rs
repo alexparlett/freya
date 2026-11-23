@@ -5,13 +5,14 @@ use std::sync::atomic::{
 
 use anyhow::bail;
 use async_tungstenite::accept_async;
-use freya_core::integration::UserEvent;
+use freya_core::integration::WindowCommand;
 use freya_winit::{
     plugins::PluginHandle,
+    reexports::winit::window::WindowId,
     renderer::{
-        NativeEvent,
-        NativeWindowEvent,
-        NativeWindowEventAction,
+        RendererMessage,
+        RendererWindowMessage,
+        RendererWindowPayload,
     },
 };
 use futures_util::stream::StreamExt;
@@ -21,8 +22,6 @@ use tungstenite::protocol::Message;
 use crate::{
     DevtoolsPlugin,
     IncomingMessage,
-    OutgoingMessage,
-    OutgoingMessageAction,
     WindowState,
     incoming::IncomingMessageAction,
 };
@@ -39,13 +38,8 @@ async fn handle_connection(
     let (mut write, mut read) = ws_stream.split();
 
     let windows_snapshot = plugin.windows.lock().unwrap().clone();
-    for (window_id, WindowState { nodes, .. }) in windows_snapshot {
-        let message = Message::Text(
-            serde_json::to_string(&OutgoingMessage {
-                action: OutgoingMessageAction::Update { window_id, nodes },
-            })?
-            .into(),
-        );
+    for WindowState { snapshot, .. } in windows_snapshot.into_values() {
+        let message = Message::Text(snapshot.into());
 
         // Send nodes snapshot
         write.send(message).await?;
@@ -61,20 +55,26 @@ async fn handle_connection(
                 if let Ok(incoming) = incoming {
                     match incoming.action {
                         IncomingMessageAction::HighlightNode { window_id, node_id } => {
+                            let window_id = WindowId::from_raw(window_id as usize);
                             plugin.highlighted_node.lock().unwrap().replace(node_id);
-                            plugin_handle.send_event_loop_event(NativeEvent::Window(
-                                NativeWindowEvent {
-                                    window_id: window_id.into(),
-                                    action: NativeWindowEventAction::User(UserEvent::RequestRedraw),
+                            plugin_handle.send_renderer_message(RendererMessage::Window(
+                                RendererWindowMessage {
+                                    window_id,
+                                    payload: RendererWindowPayload::Command(
+                                        WindowCommand::RequestRedraw,
+                                    ),
                                 },
                             ));
                         }
                         IncomingMessageAction::HoverNode { window_id, node_id } => {
+                            let window_id = WindowId::from_raw(window_id as usize);
                             *plugin.hovered_node.lock().unwrap() = node_id;
-                            plugin_handle.send_event_loop_event(NativeEvent::Window(
-                                NativeWindowEvent {
-                                    window_id: window_id.into(),
-                                    action: NativeWindowEventAction::User(UserEvent::RequestRedraw),
+                            plugin_handle.send_renderer_message(RendererMessage::Window(
+                                RendererWindowMessage {
+                                    window_id,
+                                    payload: RendererWindowPayload::Command(
+                                        WindowCommand::RequestRedraw,
+                                    ),
                                 },
                             ));
                         }

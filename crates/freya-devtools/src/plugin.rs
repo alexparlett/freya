@@ -47,7 +47,7 @@ pub(crate) type Websockets = HashMap<u32, WebSocketSender<TcpStream>>;
 #[derive(Clone)]
 pub struct WindowState {
     pub animation_clock: AnimationClock,
-    pub nodes: Vec<NodeInfo>,
+    pub snapshot: String,
 }
 
 #[derive(Default, Clone)]
@@ -94,12 +94,9 @@ impl DevtoolsPlugin {
         canvas.draw_line((x + 1.0, y2), (x + 1.0, y), &paint_inner);
     }
 
-    /// Serializes and broadcasts a message to all connected devtools clients.
-    fn broadcast(&self, message: &OutgoingMessage) {
-        let Ok(serialized) = serde_json::to_string(message) else {
-            return;
-        };
-        let outgoing_message = Message::Text(serialized.into());
+    /// Broadcasts a serialized message to all connected devtools clients.
+    fn broadcast(&self, message: String) {
+        let outgoing_message = Message::Text(message.into());
         let websockets = self.websockets.clone();
         smol::spawn(async move {
             for websocket in websockets.lock().await.values_mut() {
@@ -115,13 +112,21 @@ impl DevtoolsPlugin {
         animation_clock: &AnimationClock,
         plugin_handle: PluginHandle,
     ) {
+        let Ok(snapshot) = serde_json::to_string(&OutgoingMessage {
+            action: OutgoingMessageAction::Update {
+                window_id: window_id.into_raw() as u64,
+                nodes: vec![],
+            },
+        }) else {
+            return;
+        };
         let start_server = {
             let mut windows = self.windows.lock().unwrap();
             let start_server = windows.is_empty();
             windows.insert(
-                window_id.into(),
+                window_id.into_raw() as u64,
                 WindowState {
-                    nodes: vec![],
+                    snapshot,
                     animation_clock: animation_clock.clone(),
                 },
             );
@@ -139,7 +144,7 @@ impl DevtoolsPlugin {
         }
     }
     pub fn sync(&mut self, window_id: WindowId, scale_factor: f32, tree: &Tree) {
-        let window_id: u64 = window_id.into();
+        let window_id = window_id.into_raw() as u64;
         let mut new_nodes = Vec::new();
 
         tree.traverse_depth(|node_id| {
@@ -180,11 +185,13 @@ impl DevtoolsPlugin {
                 nodes: new_nodes,
             },
         };
-        self.broadcast(&message);
+        let Ok(snapshot) = serde_json::to_string(&message) else {
+            return;
+        };
+        self.broadcast(snapshot.clone());
 
-        let OutgoingMessageAction::Update { nodes, .. } = message.action;
         if let Some(window_state) = self.windows.lock().unwrap().get_mut(&window_id) {
-            window_state.nodes = nodes;
+            window_state.snapshot = snapshot;
         }
     }
 }
@@ -197,14 +204,16 @@ impl FreyaPlugin for DevtoolsPlugin {
     fn on_event(&mut self, event: &mut PluginEvent, plugin_handle: PluginHandle) {
         match event {
             PluginEvent::WindowClosed { window, .. } => {
-                let window_id: u64 = window.id().into();
+                let window_id = window.id().into_raw() as u64;
                 self.windows.lock().unwrap().remove(&window_id);
-                self.broadcast(&OutgoingMessage {
+                if let Ok(message) = serde_json::to_string(&OutgoingMessage {
                     action: OutgoingMessageAction::Update {
                         window_id,
                         nodes: vec![],
                     },
-                });
+                }) {
+                    self.broadcast(message);
+                }
             }
             PluginEvent::AfterRender {
                 tree,

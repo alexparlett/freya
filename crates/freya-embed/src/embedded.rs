@@ -1,12 +1,17 @@
 use std::{
     cell::RefCell,
     rc::Rc,
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
+    },
     task::Waker,
 };
 
 use freya_clipboard::prelude::{
     Clipboard,
     ClipboardProvider,
+    MemoryClipboard,
 };
 use freya_components::{
     cache::AssetCacher,
@@ -17,8 +22,11 @@ use freya_core::{
     prelude::{
         Color,
         CursorIcon,
+        DragError,
+        GlobalTasks,
         IntoElement,
         MouseButton,
+        PlatformDragCommand,
         PreferredTheme,
         ScreenReader,
         TargetPlatform,
@@ -54,8 +62,17 @@ pub struct EmbedConfig {
     /// The host answers by calling [`Embedded::update`] from its own loop.
     pub waker: Waker,
     pub preferred_theme: PreferredTheme,
+    /// The clipboard the app reads and writes. Without one the app gets a clipboard of its own,
+    /// held in memory.
     pub clipboard: Option<Box<dyn ClipboardProvider>>,
 }
+
+/// What the apps on this thread asked of their platform, shared because the [`Platform`] is.
+#[derive(Clone, Default)]
+struct AppCommands(Rc<RefCell<Vec<AppCommand>>>);
+
+/// Ids for the [`PlatformWindow`] each embedded app is.
+static NEXT_WINDOW_ID: AtomicU64 = AtomicU64::new(1);
 
 /// What an [`Embedded::update`] changed, for the host to act on.
 #[derive(Default)]
@@ -75,13 +92,14 @@ pub struct Embedded {
     tree: Tree,
     nodes_state: NodesState<NodeId>,
     accessibility: AccessibilityTree,
-    platform: Platform,
+    platform: PlatformWindow,
     ticker: RenderingTickerSender,
     animation_clock: AnimationClock,
     screen_reader: ScreenReader,
     events_sender: futures_channel::mpsc::UnboundedSender<EventsChunk>,
     events_receiver: futures_channel::mpsc::UnboundedReceiver<EventsChunk>,
-    user_events: Rc<RefCell<Vec<UserEvent>>>,
+    window_commands: Rc<RefCell<Vec<WindowCommand>>>,
+    app_commands: AppCommands,
     waker: Waker,
     name: String,
     size: Size2D,
@@ -100,24 +118,41 @@ impl Embedded {
         let app = config.app;
         let mut runner = Runner::new(move || integration(app.clone()).into_element());
 
+        // The global contexts, the clipboard and the platform are the thread's, shared by every
+        // app embedded on it.
+        let global_contexts = GlobalContexts::register();
+        if let Some(clipboard) = config.clipboard {
+            global_contexts.insert_context(Clipboard::create(clipboard));
+        } else if global_contexts.try_get_context::<Clipboard>().is_none() {
+            global_contexts.insert_context(Clipboard::create(Box::new(MemoryClipboard::default())));
+        }
+        let app_commands = global_contexts
+            .try_get_context::<AppCommands>()
+            .unwrap_or_else(|| global_contexts.insert_context(AppCommands::default()));
+        if global_contexts.try_get_context::<Platform>().is_none() {
+            let app_commands = app_commands.clone();
+            global_contexts.insert_context(Platform::new(move |command| {
+                app_commands.0.borrow_mut().push(command)
+            }));
+        }
+        if global_contexts.try_get_context::<GlobalTasks>().is_none() {
+            global_contexts.insert_context(GlobalTasks::new(config.waker.clone()));
+        }
+
         let screen_reader = runner.provide_root_context(ScreenReader::new);
-        runner.provide_root_context(|| {
-            let global_contexts = GlobalContexts::default();
-            global_contexts.insert_context(Clipboard::create(config.clipboard));
-            global_contexts
-        });
         let (ticker, ticker_receiver) = RenderingTicker::new();
         runner.provide_root_context(|| ticker_receiver);
         let animation_clock = runner.provide_root_context(AnimationClock::new);
         runner.provide_root_context(AssetCacher::create);
         runner.provide_root_context(TargetPlatform::detect);
 
-        let user_events = Rc::new(RefCell::new(Vec::new()));
+        let window_commands = Rc::new(RefCell::new(Vec::new()));
         let scale_factor = config.scale_factor;
         let size = config.size;
-        let platform = runner.provide_root_context({
-            let user_events = user_events.clone();
-            move || Platform {
+        let platform = runner.run_in({
+            let window_commands = window_commands.clone();
+            move || PlatformWindow {
+                id: NEXT_WINDOW_ID.fetch_add(1, Ordering::Relaxed),
                 focused_accessibility_id: State::create(ACCESSIBILITY_ROOT_ID),
                 focused_accessibility_node: State::create(accesskit::Node::new(
                     accesskit::Role::Window,
@@ -134,9 +169,11 @@ impl Embedded {
                 preferred_theme: State::create(config.preferred_theme),
                 is_app_focused: State::create(false),
                 accent_color: State::create(AccentColor::default()),
-                sender: Rc::new(move |event| user_events.borrow_mut().push(event)),
+                sender: Rc::new(move |command| window_commands.borrow_mut().push(command)),
             }
         });
+        Platform::get().register_window(platform.clone());
+        runner.provide_root_context(|| CurrentWindowId(platform.id));
 
         let tree = Tree::default();
         runner.provide_root_context(|| tree.accessibility_generator.clone());
@@ -154,7 +191,8 @@ impl Embedded {
             screen_reader,
             events_sender,
             events_receiver,
-            user_events,
+            window_commands,
+            app_commands,
             waker: config.waker,
             name: config.name,
             size,
@@ -222,8 +260,11 @@ impl Embedded {
         // nothing left and its future is pending, which leaves the waker armed.
         let mut armed = false;
         for _ in 0..8 {
+            if let Some(tasks) = GlobalTasks::try_get() {
+                tasks.poll();
+            }
             let worked = self.sync();
-            let requested = self.fulfil_user_events(fonts);
+            let requested = self.fulfil_commands(fonts);
             if !worked && !requested && self.poll_runner() {
                 armed = true;
                 break;
@@ -254,10 +295,7 @@ impl Embedded {
         };
         if self.accessibility_dirty {
             self.accessibility_dirty = false;
-            let tree_update = self.process_accessibility();
-            if self.screen_reader.is_on() {
-                update.accessibility = Some(tree_update);
-            }
+            update.accessibility = self.process_accessibility();
         }
         let cursor = self.tree.cursor_icon(&self.nodes_state);
         if cursor != self.cursor {
@@ -480,13 +518,14 @@ impl Embedded {
     }
 
     /// Acts on what the app asked of its platform; true if it asked anything.
-    fn fulfil_user_events(&mut self, fonts: &mut Fonts) -> bool {
-        let events = std::mem::take(&mut *self.user_events.borrow_mut());
-        let requested = !events.is_empty();
-        for event in events {
-            match event {
-                UserEvent::RequestRedraw => self.needs_render = true,
-                UserEvent::FocusAccessibilityNode(strategy) => {
+    fn fulfil_commands(&mut self, fonts: &mut Fonts) -> bool {
+        let window_commands = std::mem::take(&mut *self.window_commands.borrow_mut());
+        let app_commands = std::mem::take(&mut *self.app_commands.0.borrow_mut());
+        let requested = !window_commands.is_empty() || !app_commands.is_empty();
+        for command in window_commands {
+            match command {
+                WindowCommand::RequestRedraw => self.needs_render = true,
+                WindowCommand::FocusAccessibilityNode(strategy) => {
                     if matches!(
                         strategy,
                         AccessibilityFocusStrategy::Forward(_)
@@ -500,10 +539,20 @@ impl Embedded {
                     self.tree.accessibility_diff.request_focus(strategy);
                     self.accessibility_dirty = true;
                 }
-                UserEvent::SetCustomScaleFactor(factor) => {
+                WindowCommand::SetCustomScaleFactor(factor) => {
                     self.platform.custom_scale_factor.set_if_modified(factor);
                 }
-                UserEvent::LoadFont {
+                // A shell surface has no platform drag to start.
+                WindowCommand::Erased(command) => {
+                    if let Ok(command) = command.0.downcast::<PlatformDragCommand>() {
+                        let _ = command.response.send(Err(DragError::Unsupported));
+                    }
+                }
+            }
+        }
+        for command in app_commands {
+            match command {
+                AppCommand::LoadFont {
                     font_name,
                     font_data,
                 } => {
@@ -515,21 +564,23 @@ impl Embedded {
                     }
                 }
                 // A shell surface has no browser to open a link in; the host offers its own.
-                UserEvent::OpenUrl(url) => tracing::debug!("open {url} ignored"),
-                UserEvent::Erased(_) => {}
+                AppCommand::OpenUrl(url) => tracing::debug!("open {url} ignored"),
+                // The host owns the loop, so it is the one to end it.
+                AppCommand::Exit | AppCommand::Erased(_) => {}
             }
         }
         requested
     }
 
-    fn process_accessibility(&mut self) -> accesskit::TreeUpdate {
-        self.accessibility.export = self.screen_reader.is_on();
-        let update =
-            self.accessibility
-                .process_updates(&mut self.tree, &self.events_sender, &self.name);
+    /// Updates focus and the id map, and builds the accessibility nodes only while a screen
+    /// reader listens.
+    fn process_accessibility(&mut self) -> Option<accesskit::TreeUpdate> {
+        let updated_nodes = self
+            .accessibility
+            .prepare_updates(&mut self.tree, &self.events_sender);
         self.platform
             .focused_accessibility_id
-            .set_if_modified(update.focus);
+            .set_if_modified(self.accessibility.focused_id);
         if let Some(node_id) = self.accessibility.focused_node_id()
             && let Some(layout_node) = self.tree.layout.get(&node_id)
         {
@@ -541,7 +592,20 @@ impl Embedded {
         if let Some(mode) = self.accessibility_mode.take() {
             self.platform.navigation_mode.set_if_modified(mode);
         }
-        update
+        self.screen_reader.is_on().then(|| {
+            self.accessibility
+                .build_update(&self.tree, &self.name, updated_nodes)
+        })
+    }
+}
+
+impl Drop for Embedded {
+    fn drop(&mut self) {
+        if let Some(platform) =
+            GlobalContexts::try_get().and_then(|contexts| contexts.try_get_context::<Platform>())
+        {
+            platform.unregister_window(self.platform.id);
+        }
     }
 }
 

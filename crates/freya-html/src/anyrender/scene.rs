@@ -44,15 +44,18 @@ use freya_engine::prelude::{
 };
 use peniko::color::AlphaColor;
 
-use crate::anyrender::{
-    cache::{
-        FontCacheKey,
-        FontCacheKeyBorrowed,
-        GenerationalCache,
-        NormalizedTypefaceCacheKey,
-        NormalizedTypefaceCacheKeyBorrowed,
+use crate::{
+    anyrender::{
+        cache::{
+            FontCacheKey,
+            FontCacheKeyBorrowed,
+            GenerationalCache,
+            NormalizedTypefaceCacheKey,
+            NormalizedTypefaceCacheKeyBorrowed,
+        },
+        scene::sk_peniko::color4f_from_alpha_color,
     },
-    scene::sk_peniko::color4f_from_alpha_color,
+    fonts::TypefaceCache,
 };
 
 pub struct SkiaSceneCache {
@@ -61,6 +64,7 @@ pub struct SkiaSceneCache {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     extracted_font_data: GenerationalCache<(u64, u32), peniko::FontData>,
     typeface: GenerationalCache<(u64, u32), Typeface>,
+    shared_typefaces: TypefaceCache,
     normalized_typeface: GenerationalCache<NormalizedTypefaceCacheKey, Typeface>,
     image_shader: GenerationalCache<u64, Shader>,
     font: GenerationalCache<FontCacheKey, Font>,
@@ -92,6 +96,7 @@ impl Default for SkiaSceneCache {
             #[cfg(any(target_os = "macos", target_os = "ios"))]
             extracted_font_data: GenerationalCache::new(10),
             typeface: GenerationalCache::new(1),
+            shared_typefaces: TypefaceCache::get(),
             normalized_typeface: GenerationalCache::new(1),
             image_shader: GenerationalCache::new(1),
             font: GenerationalCache::new(10),
@@ -142,15 +147,16 @@ impl SkiaScenePainter<'_> {
         self.inner.concat(&sk_kurbo::matrix_from_affine(transform));
     }
 
-    fn clip(&self, shape: &impl kurbo::Shape) {
+    fn clip(&self, fill: peniko::Fill, shape: &impl kurbo::Shape) {
         if let Some(rect) = shape.as_rect() {
             self.inner.clip_rect(sk_kurbo::rect_from(rect), None, true);
         } else if let Some(rrect) = shape.as_rounded_rect() {
             self.inner
                 .clip_rrect(sk_kurbo::rrect_from(rrect), None, true);
         } else {
-            self.inner
-                .clip_path(&sk_kurbo::path_from_shape(shape), None, true);
+            let mut path = sk_kurbo::path_from_shape(shape);
+            path.set_fill_type(sk_peniko::path_fill_type_from_fill(fill));
+            self.inner.clip_path(&path, None, true);
         }
     }
 
@@ -339,6 +345,18 @@ impl SkiaScenePainter<'_> {
             return Some(cached.clone());
         }
 
+        let cache_key = NormalizedTypefaceCacheKey {
+            typeface_id: font.data.id(),
+            typeface_index: font.index,
+            normalized_coords: normalized_coords.to_vec(),
+        };
+        if let Some(typeface) = self.cache.shared_typefaces.read(font, normalized_coords) {
+            self.cache
+                .normalized_typeface
+                .insert(cache_key, typeface.clone());
+            return Some(typeface);
+        }
+
         let typeface = self.get_or_cache_typeface(font)?;
 
         let axes = typeface.variation_design_parameters().unwrap_or_default();
@@ -374,14 +392,14 @@ impl SkiaScenePainter<'_> {
             )
             .unwrap();
 
-        self.cache.normalized_typeface.insert(
-            NormalizedTypefaceCacheKey {
-                typeface_id: font.data.id(),
-                typeface_index: font.index,
-                normalized_coords: normalized_coords.to_vec(),
-            },
+        self.cache.shared_typefaces.insert(
+            font.clone(),
+            normalized_coords,
             normalized_typeface.clone(),
         );
+        self.cache
+            .normalized_typeface
+            .insert(cache_key, normalized_typeface.clone());
 
         Some(normalized_typeface)
     }
@@ -391,6 +409,14 @@ impl SkiaScenePainter<'_> {
         #[allow(unused_mut)] mut font: &'a peniko::FontData,
     ) -> Option<Typeface> {
         let cache_key = (font.data.id(), font.index);
+        if let Some(cached) = self.cache.typeface.hit(&cache_key) {
+            return Some(cached.clone());
+        }
+        if let Some(typeface) = self.cache.shared_typefaces.read(font, &[]) {
+            self.cache.typeface.insert(cache_key, typeface.clone());
+            return Some(typeface);
+        }
+        let source_font = font.clone();
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         #[allow(clippy::map_entry, reason = "Cannot early-return with entry API")]
@@ -417,10 +443,6 @@ impl SkiaScenePainter<'_> {
             }
         }
 
-        if let Some(cached) = self.cache.typeface.hit(&cache_key) {
-            return Some(cached.clone());
-        }
-
         let Some(typeface) = self
             .cache
             .font_mgr
@@ -430,6 +452,9 @@ impl SkiaScenePainter<'_> {
             return None;
         };
 
+        self.cache
+            .shared_typefaces
+            .insert(source_font, &[], typeface.clone());
         self.cache.typeface.insert(cache_key, typeface.clone());
 
         Some(typeface)
@@ -444,6 +469,7 @@ impl PaintScene for SkiaScenePainter<'_> {
 
     fn push_layer(
         &mut self,
+        fill: peniko::Fill,
         blend: impl Into<peniko::BlendMode>,
         alpha: f32,
         transform: kurbo::Affine,
@@ -464,7 +490,7 @@ impl PaintScene for SkiaScenePainter<'_> {
         self.inner.save();
 
         self.set_matrix(transform);
-        self.clip(clip);
+        self.clip(fill, clip);
 
         let backdrop_filter = backdrop_filter.as_ref().and_then(|f| convert_filter(f));
         let mut save_layer_rec = SaveLayerRec::default().paint(&self.cache.paint);
@@ -475,11 +501,16 @@ impl PaintScene for SkiaScenePainter<'_> {
         self.inner.save_layer(&save_layer_rec);
     }
 
-    fn push_clip_layer(&mut self, transform: kurbo::Affine, clip: &impl kurbo::Shape) {
+    fn push_clip_layer(
+        &mut self,
+        fill: peniko::Fill,
+        transform: kurbo::Affine,
+        clip: &impl kurbo::Shape,
+    ) {
         self.inner.save(); // we need to do two saves because of pop_layer
 
         self.set_matrix(transform);
-        self.clip(clip);
+        self.clip(fill, clip);
         self.inner.save();
     }
 

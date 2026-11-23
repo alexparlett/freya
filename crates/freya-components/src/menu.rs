@@ -14,6 +14,10 @@ use torin::{
 use crate::{
     define_theme,
     get_theme,
+    icons::{
+        IconThemePartialExt,
+        arrow::ArrowIcon,
+    },
 };
 
 define_theme! {
@@ -91,13 +95,13 @@ pub struct Menu {
 }
 
 impl ChildrenExt for Menu {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
 
 impl KeyExt for Menu {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -130,7 +134,7 @@ impl Menu {
 /// Size constraints for the menu's container, e.g. a `min_width` so short items don't collapse
 /// or wrap.
 impl LayoutExt for Menu {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.layout
     }
 }
@@ -205,6 +209,7 @@ impl ComponentOwned for Menu {
                     .children(self.children),
             )
     }
+
     fn render_key(&self) -> DiffKey {
         self.key.clone().or(self.default_key())
     }
@@ -226,22 +231,41 @@ const MENU_BORDER_WIDTH: f32 = 1.;
 ///         .child(MenuItem::new().child("Item 2"))
 /// }
 /// ```
-#[derive(Default, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct MenuContainer {
     pub(crate) theme: Option<MenuContainerThemePartial>,
     children: Vec<Element>,
     layout: LayoutData,
+    layer: Layer,
     key: DiffKey,
 }
 
+impl Default for MenuContainer {
+    fn default() -> Self {
+        Self {
+            theme: None,
+            children: Vec::new(),
+            layout: LayoutData::default(),
+            layer: Layer::Overlay,
+            key: DiffKey::None,
+        }
+    }
+}
+
+impl LayerExt for MenuContainer {
+    fn layer_mut(&mut self) -> &mut Layer {
+        &mut self.layer
+    }
+}
+
 impl KeyExt for MenuContainer {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
 
 impl ChildrenExt for MenuContainer {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
@@ -259,7 +283,7 @@ impl MenuContainer {
 
 /// Size constraints for the container box.
 impl LayoutExt for MenuContainer {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.layout
     }
 }
@@ -277,37 +301,34 @@ impl ComponentOwned for MenuContainer {
         // Inside an `Attached` overlay the position arrives already window-clamped
         // (`AttachedHosted`), and a second self-measured correction would lag a frame
         // behind it and paint a visible jump, so skip it. The self-correction remains for
-        // directly-positioned hosts (the `ContextMenu` overlay at the cursor), where the
+        // other floating hosts (the `ContextMenu` overlay at the cursor), where the
         // first measurement is already at the final position.
         let hosted = try_consume_context::<crate::attached::AttachedHosted>().is_some();
-        let (offset_x, offset_y, opacity) = if hosted {
-            (0.0, 0.0, 1.0)
-        } else {
-            match measured() {
-                None => (0.0, 0.0, 0.0),
-                Some((area, root_size)) => (
-                    overflow_offset(area.origin.x, area.size.width, root_size.width),
-                    overflow_offset(area.origin.y, area.size.height, root_size.height),
-                    1.0,
-                ),
-            }
+        let floating = matches!(self.layer, Layer::Overlay | Layer::OverlayLevel(_));
+        let corrects_overflow = floating && !hosted;
+        let (offset_x, offset_y, opacity) = match measured() {
+            _ if !corrects_overflow => (0.0, 0.0, 1.0),
+            None => (0.0, 0.0, 0.0),
+            Some((area, root_size)) => (
+                overflow_offset(area.origin.x, area.size.width, root_size.width),
+                overflow_offset(area.origin.y, area.size.height, root_size.height),
+                1.0,
+            ),
         };
 
         rect()
-            .layer(Layer::Overlay)
+            .layer(self.layer)
             .content(Content::fit())
             .opacity(opacity)
             .offset_x(offset_x)
             .offset_y(offset_y)
-            .on_sized(move |e: Event<SizedEventData>| {
-                // Track every re-measure, not just the first: inside an `Attached` overlay
-                // the first `Sized` fires *before* the attached positioning applies, so a
-                // frozen first measurement locks the window-overflow correction to a
-                // pre-position area (a first-open menu lands visibly displaced). The
-                // offsets shift this rect's *children*, never its own area, so updating
-                // here cannot loop.
-                let root_size = *Platform::get().root_size.peek();
-                measured.set_if_modified(Some((e.area, root_size)));
+            .maybe(corrects_overflow, |el| {
+                el.on_sized(move |e: Event<SizedEventData>| {
+                    // Every re-measure is tracked, not just the first. The offsets shift this
+                    // rect's children, never its own area, so updating here cannot loop.
+                    let root_size = *Platform::get().current_window().root_size.peek();
+                    measured.set_if_modified(Some((e.area, root_size)));
+                })
             })
             .child(
                 rect()
@@ -315,7 +336,7 @@ impl ComponentOwned for MenuContainer {
                     .a11y_member_of(a11y_id)
                     .a11y_focusable(true)
                     .a11y_role(AccessibilityRole::Menu)
-                    .shadow((0.0, 4.0, 10.0, 0., theme.shadow))
+                    .shadow(Shadow::new().y(6.).blur(18.).color(theme.shadow))
                     .background(theme.background)
                     .corner_radius(theme.corner_radius)
                     .padding(theme.padding)
@@ -365,6 +386,7 @@ pub struct MenuItem {
     on_pointer_enter: Option<EventHandler<Event<PointerEventData>>>,
     selected: bool,
     enabled: bool,
+    submenu: bool,
     padding: Gaps,
     key: DiffKey,
 }
@@ -378,14 +400,15 @@ impl Default for MenuItem {
             on_pointer_enter: None,
             selected: false,
             enabled: true,
-            padding: (8.0, 14.0).into(),
+            submenu: false,
+            padding: (6.0, 14.0).into(),
             key: DiffKey::None,
         }
     }
 }
 
 impl KeyExt for MenuItem {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -423,6 +446,11 @@ impl MenuItem {
         self
     }
 
+    pub fn submenu(mut self, submenu: bool) -> Self {
+        self.submenu = submenu;
+        self
+    }
+
     /// Set the padding for this menu item.
     pub fn padding(mut self, padding: impl Into<Gaps>) -> Self {
         self.padding = padding.into();
@@ -447,7 +475,7 @@ impl MenuItem {
 }
 
 impl ChildrenExt for MenuItem {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
@@ -513,7 +541,7 @@ impl ComponentOwned for MenuItem {
             .a11y_id(a11y_id)
             .a11y_focusable(enabled)
             .a11y_member_of(group_id)
-            .min_width(Size::px(105.))
+            .min_width(Size::px(120.))
             .width(Size::fill_minimum())
             .content(Content::fit())
             .padding(self.padding)
@@ -530,6 +558,16 @@ impl ComponentOwned for MenuItem {
             .on_pointer_enter(on_pointer_enter)
             .on_pointer_leave(on_pointer_leave)
             .maybe(enabled, |el| el.on_press(on_press))
+            .maybe(self.submenu, |el| {
+                el.child(
+                    rect()
+                        .position(Position::new_absolute().right(0.).top(0.))
+                        .width(Size::px(10.))
+                        .height(Size::fill())
+                        .main_align(Alignment::Center)
+                        .child(ArrowIcon::new().rotate(270.).fill(color.with_a(180))),
+                )
+            })
             .children(self.children)
     }
 
@@ -574,13 +612,13 @@ impl Default for MenuButton {
 }
 
 impl ChildrenExt for MenuButton {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
 
 impl KeyExt for MenuButton {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -660,7 +698,7 @@ pub struct SubMenu {
 }
 
 impl KeyExt for SubMenu {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -688,7 +726,7 @@ impl SubMenu {
 /// something on its trailing edge — a shortcut hint, a submenu chevron — needs the container to
 /// have a width before it can push anything to the far side of it.
 impl LayoutExt for SubMenu {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.layout
     }
 }
@@ -696,7 +734,7 @@ impl LayoutExt for SubMenu {
 impl ContainerConstraintsExt for SubMenu {}
 
 impl ChildrenExt for SubMenu {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.items
     }
 }
@@ -743,9 +781,14 @@ impl ComponentOwned for SubMenu {
         };
 
         MenuItem::new()
+            .submenu(true)
             .on_pointer_enter(on_pointer_enter)
             .on_press(on_press)
-            .child(rect().horizontal().maybe_child(self.label.clone()))
+            .child(
+                rect()
+                    .margin(Gaps::new(0., 22., 0., 0.))
+                    .maybe_child(self.label),
+            )
             .maybe_child(show_submenu.then(|| {
                 rect()
                     .position(Position::new_absolute().top(-8.).right(-outset))

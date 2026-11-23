@@ -89,6 +89,7 @@ pub enum SelectPlacement {
 pub struct Select {
     pub(crate) theme: Option<SelectThemePartial>,
     selected_item: Option<Element>,
+    list_match_width: bool,
     children: Vec<Element>,
     cursor_icon: Option<CursorIcon>,
     placement: SelectPlacement,
@@ -96,13 +97,13 @@ pub struct Select {
 }
 
 impl ChildrenExt for Select {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
 
 impl KeyExt for Select {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -118,6 +119,7 @@ impl Select {
         Self {
             theme: None,
             selected_item: None,
+            list_match_width: false,
             children: Vec::new(),
             cursor_icon: None,
             placement: SelectPlacement::default(),
@@ -132,6 +134,12 @@ impl Select {
 
     pub fn selected_item(mut self, item: impl Into<Element>) -> Self {
         self.selected_item = Some(item.into());
+        self
+    }
+
+    /// Match the dropdiwb width to the button width.
+    pub fn list_match_width(mut self, enabled: bool) -> Self {
+        self.list_match_width = enabled;
         self
     }
 
@@ -172,6 +180,7 @@ impl Component for Select {
         let focused = use_memo(move || {
             a11y_id.is_focused()
                 || Platform::get()
+                    .current_window()
                     .focused_accessibility_node
                     .read()
                     .member_of()
@@ -255,7 +264,7 @@ impl Component for Select {
                     // Measured areas and `root_size` are both logical, so the
                     // fits-below/fits-above comparison is unit-consistent.
                     SelectPlacement::Auto => {
-                        let root_height = Platform::get().root_size.peek().height;
+                        let root_height = Platform::get().current_window().root_size.peek().height;
                         let space_below = root_height - button.max_y();
                         let space_above = button.min_y();
                         list.height > space_below && list.height <= space_above
@@ -281,9 +290,13 @@ impl Component for Select {
 
         let opacity = if list_size().is_some() { opacity } else { 0. };
 
-        let background = match *status.read() {
-            SelectStatus::Hovering => theme.hover_background,
-            SelectStatus::Idle => theme.background_button,
+        let background = if open() {
+            theme.hover_background * 0.92
+        } else {
+            match *status.read() {
+                SelectStatus::Hovering => theme.hover_background,
+                SelectStatus::Idle => theme.background_button,
+            }
         };
 
         let border = if focus() == Focus::Keyboard {
@@ -292,10 +305,7 @@ impl Component for Select {
                 .width(2.)
                 .alignment(BorderAlignment::Inner)
         } else {
-            Border::new()
-                .fill(theme.border_fill)
-                .width(1.)
-                .alignment(BorderAlignment::Inner)
+            Border::new().width(0.)
         };
 
         rect()
@@ -317,24 +327,29 @@ impl Component for Select {
                     .width(theme.width)
                     .margin(theme.margin)
                     .background(background)
-                    .padding((8., 18., 8., 18.))
+                    .padding((8., 12., 8., 12.))
                     .border(border)
                     .horizontal()
+                    .content(Content::flex())
                     .center()
                     .color(theme.color)
-                    .corner_radius(8.)
+                    .corner_radius(10.)
                     .maybe_child(self.selected_item.clone())
                     .child(
                         ArrowIcon::new()
-                            .margin((0., 0., 0., 8.))
-                            .rotate(0.)
+                            .margin((0., 0., 0., 12.))
+                            .rotate(if open() { 180. } else { 0. })
                             .fill(theme.arrow_fill),
                     ),
             )
             .maybe_child((visible || opacity > 0.).then(|| {
                 rect().height(Size::px(0.)).width(Size::px(0.)).child(
                     rect()
-                        .width(Size::window_percent(100.))
+                        .width(if self.list_match_width {
+                            Size::px(button_area().map_or(0., |area| area.width()))
+                        } else {
+                            Size::window_percent(100.)
+                        })
                         .margin(Gaps::new(theme.list_margin, 0., theme.list_margin, 0.))
                         .offset_y(offset_y)
                         .on_sized(move |e: Event<SizedEventData>| {
@@ -343,6 +358,9 @@ impl Component for Select {
                         .child(
                             rect()
                                 .layer(Layer::Overlay)
+                                .maybe(self.list_match_width, |el| el.width(Size::fill()))
+                                .min_width(Size::px(button_area().map_or(0., |area| area.width())))
+                                .shadow(Shadow::new().y(6.).blur(18.).color((0, 0, 0, 0.25)))
                                 .border(
                                     Border::new()
                                         .fill(theme.border_fill)
@@ -350,10 +368,10 @@ impl Component for Select {
                                         .alignment(BorderAlignment::Inner),
                                 )
                                 .overflow(Overflow::Clip)
-                                .corner_radius(10.)
+                                .corner_radius(20.)
                                 .background(theme.select_background)
                                 .padding(6.)
-                                .content(Content::Fit)
+                                .maybe(!self.list_match_width, |el| el.content(Content::Fit))
                                 .opacity(opacity)
                                 .child(
                                     // The cap belongs on the scroll rather than on the box
@@ -362,7 +380,11 @@ impl Component for Select {
                                     // items in both axes, so a list under the cap lays out
                                     // exactly as it did before.
                                     ScrollView::new()
-                                        .width(Size::Inner)
+                                        .width(if self.list_match_width {
+                                            Size::fill()
+                                        } else {
+                                            Size::Inner
+                                        })
                                         .height(Size::Inner)
                                         .max_height(theme.list_max_height.clone())
                                         // A `MenuItem` is `fill_minimum`, so the items need a
@@ -372,6 +394,9 @@ impl Component for Select {
                                         .child(
                                             rect()
                                                 .content(Content::Fit)
+                                                .maybe(self.list_match_width, |el| {
+                                                    el.width(Size::fill())
+                                                })
                                                 .children(self.children.clone()),
                                         ),
                                 ),

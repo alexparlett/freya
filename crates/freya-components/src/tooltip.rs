@@ -105,13 +105,13 @@ impl Default for Tooltip {
 }
 
 impl KeyExt for Tooltip {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
 
 impl ChildrenExt for Tooltip {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
@@ -228,13 +228,13 @@ pub struct TooltipContainer {
 }
 
 impl KeyExt for TooltipContainer {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
 
 impl LayoutExt for TooltipContainer {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.layout
     }
 }
@@ -243,7 +243,7 @@ impl ContainerSizeExt for TooltipContainer {}
 impl ContainerPositionExt for TooltipContainer {}
 
 impl ChildrenExt for TooltipContainer {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
@@ -390,7 +390,7 @@ impl Component for TooltipContainer {
                             // flip; tracking every re-measure keeps it fresh across
                             // remounts and cannot loop: the flip never changes the
                             // tooltip's size.
-                            let root_size = *Platform::get().root_size.peek();
+                            let root_size = *Platform::get().current_window().root_size.peek();
                             measured.set_if_modified(Some((e.area, root_size)));
                         })
                         .opacity(opacity)

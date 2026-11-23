@@ -38,6 +38,7 @@ define_theme! {
         /// for the box, every row is banded.
         border_fill: Color,
         corner_radius: CornerRadius,
+        cell_padding: Gaps,
         color: Color,
     }
 }
@@ -66,7 +67,7 @@ impl TableArrow {
 }
 
 impl KeyExt for TableArrow {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -157,7 +158,7 @@ impl TableRow {
 }
 
 impl LayoutExt for TableRow {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.layout
     }
 }
@@ -165,13 +166,13 @@ impl LayoutExt for TableRow {
 impl ContainerExt for TableRow {}
 
 impl ChildrenExt for TableRow {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
 
 impl KeyExt for TableRow {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -214,10 +215,7 @@ impl Component for TableRow {
             .content(Content::Flex)
             .cross_align(Alignment::Center)
             .background(background)
-            .border(Border::new().fill(theme.divider_fill).width(BorderWidth {
-                bottom: 1.,
-                ..Default::default()
-            }))
+            .border(Border::bottom(theme.divider_fill, 1.))
             .on_pointer_enter(move |_| hovering.set(true))
             .on_pointer_leave(move |_| hovering.set(false))
             .map(self.on_press.clone(), |el, on_press| {
@@ -236,7 +234,7 @@ impl Component for TableRow {
                 rect()
                     .width(width)
                     .overflow(Overflow::Clip)
-                    .padding(Gaps::new_all(5.0))
+                    .padding(theme.cell_padding)
                     .horizontal()
                     .main_align(main_align)
                     .cross_align(Alignment::Center)
@@ -324,19 +322,19 @@ impl Table {
 }
 
 impl ChildrenExt for Table {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
 
 impl KeyExt for Table {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
 
 impl LayoutExt for Table {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.layout
     }
 }

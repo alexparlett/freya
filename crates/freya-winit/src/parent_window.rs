@@ -20,7 +20,7 @@ use winit::window::Window;
 
 /// Make `child` a child window of `parent`, ordered above it. Re-parenting is a single call:
 /// a child that already belongs to another window leaves that one first.
-pub(crate) fn set_parent(child: &Window, parent: &Window) {
+pub(crate) fn set_parent(child: &dyn Window, parent: &dyn Window) {
     #[cfg(target_os = "macos")]
     macos::set_parent(child, parent);
     #[cfg(not(target_os = "macos"))]
@@ -29,7 +29,7 @@ pub(crate) fn set_parent(child: &Window, parent: &Window) {
 
 /// Detach `child` from whatever window it is a child of, leaving it a plain top-level window.
 /// Does nothing when it has no parent.
-pub(crate) fn clear_parent(child: &Window) {
+pub(crate) fn clear_parent(child: &dyn Window) {
     #[cfg(target_os = "macos")]
     macos::clear_parent(child);
     #[cfg(not(target_os = "macos"))]
@@ -52,7 +52,7 @@ mod macos {
 
     /// Resolve the `NSWindow` behind a winit [`Window`]. `None` when the handle is not AppKit
     /// or the view is not in a window yet.
-    fn ns_window(window: &Window) -> Option<Retained<NSWindow>> {
+    fn ns_window(window: &dyn Window) -> Option<Retained<NSWindow>> {
         let RawWindowHandle::AppKit(handle) = window.window_handle().ok()?.as_raw() else {
             return None;
         };
@@ -60,7 +60,7 @@ mod macos {
         ns_view.window()
     }
 
-    pub(crate) fn set_parent(child: &Window, parent: &Window) {
+    pub(crate) fn set_parent(child: &dyn Window, parent: &dyn Window) {
         let (Some(child), Some(parent)) = (ns_window(child), ns_window(parent)) else {
             return;
         };
@@ -70,7 +70,7 @@ mod macos {
         unsafe { parent.addChildWindow_ordered(&child, NSWindowOrderingMode::Above) };
     }
 
-    pub(crate) fn clear_parent(child: &Window) {
+    pub(crate) fn clear_parent(child: &dyn Window) {
         let Some(child) = ns_window(child) else {
             return;
         };

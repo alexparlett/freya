@@ -52,7 +52,7 @@ pub struct TitlebarButton {
 }
 
 impl KeyExt for TitlebarButton {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -127,6 +127,7 @@ impl Component for TitlebarButton {
         rect()
             .width(theme.width)
             .height(theme.height)
+            .corner_radius(theme.corner_radius)
             .background(background)
             .color(color)
             .center()

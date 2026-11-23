@@ -77,6 +77,7 @@ use crate::{
         LayoutExt,
         MaybeExt,
         TextAlign,
+        TextOverflowExt,
         TextStyleExt,
         VerticalAlign,
     },
@@ -280,6 +281,11 @@ impl ElementExt for ParagraphElement {
             diff.insert(DiffModifies::LAYOUT);
         }
 
+        // If holder is different and there is a change,  rerun layout
+        if !diff.is_empty() && self.sk_paragraph != paragraph.sk_paragraph {
+            diff.insert(DiffModifies::LAYOUT);
+        }
+
         diff
     }
 
@@ -471,7 +477,9 @@ impl ElementExt for ParagraphElement {
 
     fn render(&self, context: RenderContext) {
         let paragraph = self.sk_paragraph.0.borrow();
-        let ParagraphHolderInner { paragraph, .. } = paragraph.as_ref().unwrap();
+        let ParagraphHolderInner { paragraph, .. } = paragraph
+            .as_ref()
+            .expect("Paragraph has not been measured yet");
         let inner_area = context.layout_node.inner_area;
 
         let cursor_area = match self.cursor_mode {
@@ -565,10 +573,8 @@ impl ElementExt for ParagraphElement {
         }
 
         // Draw text
-        paragraph.paint_at(
-            context.canvas,
-            Point2D::new(inner_area.min_x(), inner_area.min_y() + vertical_offset).cast_unit(),
-        );
+        let origin = Point2D::new(inner_area.min_x(), inner_area.min_y() + vertical_offset);
+        paragraph.paint_at(context.canvas, origin.cast_unit());
 
         // Draw cursor
         if let Some(cursor_index) = self.cursor_index
@@ -799,12 +805,12 @@ impl From<Paragraph> for Element {
                     .child(child)
                     .into_element()
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         Element::Element {
             key: value.key,
             element: Rc::new(value.element),
-            elements,
+            elements: elements.into(),
         }
     }
 }
@@ -823,7 +829,8 @@ impl TextStyleState {
         let mut font_families = self.font_families.clone();
         font_families.extend_from_slice(fallback_fonts);
 
-        self.color.apply_to_text_style(&mut text_style, fill_area);
+        self.color
+            .apply_to_text_style(&mut text_style, fill_area, self, scale_factor);
         text_style.set_font_size(f32::from(self.font_size) * scale_factor as f32);
         text_style.set_font_families(&font_families);
         text_style.set_font_style(FontStyle::new(
@@ -878,7 +885,7 @@ impl Span<'_> {
 
         span_style
             .color
-            .apply_to_text_style(&mut text_style, fill_area);
+            .apply_to_text_style(&mut text_style, fill_area, &span_style, scale_factor);
         text_style.set_font_size(f32::from(span_style.font_size) * scale_factor as f32);
         text_style.set_font_families(&font_families);
         text_style.set_font_style(FontStyle::new(
@@ -945,13 +952,13 @@ impl ParagraphPaintExt for SkParagraph {
 }
 
 impl KeyExt for Paragraph {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
 
 impl EventHandlersExt for Paragraph {
-    fn get_event_handlers(&mut self) -> &mut EventHandlers {
+    fn event_handlers_mut(&mut self) -> &mut EventHandlers {
         &mut self.element.event_handlers
     }
 }
@@ -959,7 +966,7 @@ impl EventHandlersExt for Paragraph {
 impl MaybeExt for Paragraph {}
 
 impl LayerExt for Paragraph {
-    fn get_layer(&mut self) -> &mut Layer {
+    fn layer_mut(&mut self) -> &mut Layer {
         &mut self.element.relative_layer
     }
 }
@@ -972,7 +979,7 @@ pub struct Paragraph {
 }
 
 impl LayoutExt for Paragraph {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.element.layout
     }
 }
@@ -982,7 +989,7 @@ impl ContainerExt for Paragraph {}
 /// Children added to a [Paragraph] flow inline at the point they were added, each laid out at
 /// its own measured size, so give them an explicit `width` and `height`.
 impl ChildrenExt for Paragraph {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 
@@ -1007,19 +1014,21 @@ impl ChildrenExt for Paragraph {
 }
 
 impl AccessibilityExt for Paragraph {
-    fn get_accessibility_data(&mut self) -> &mut AccessibilityData {
+    fn accessibility_data_mut(&mut self) -> &mut AccessibilityData {
         &mut self.element.accessibility
     }
 }
 
+impl TextOverflowExt for Paragraph {}
+
 impl TextStyleExt for Paragraph {
-    fn get_text_style_data(&mut self) -> &mut TextStyleData {
+    fn text_style_data_mut(&mut self) -> &mut TextStyleData {
         &mut self.element.text_style_data
     }
 }
 
 impl EffectExt for Paragraph {
-    fn get_effect(&mut self) -> &mut EffectData {
+    fn effect_mut(&mut self) -> &mut EffectData {
         self.element.effect.get_or_insert_with(EffectData::default)
     }
 }
@@ -1168,7 +1177,7 @@ impl<'a> Span<'a> {
 }
 
 impl<'a> TextStyleExt for Span<'a> {
-    fn get_text_style_data(&mut self) -> &mut TextStyleData {
+    fn text_style_data_mut(&mut self) -> &mut TextStyleData {
         &mut self.text_style_data
     }
 }

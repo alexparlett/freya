@@ -3,10 +3,8 @@ use std::time::{
     Instant,
 };
 
-use freya_core::{
-    notify::Notify,
-    prelude::*,
-};
+use freya_core::prelude::*;
+use tiny_notify::Notify;
 
 #[derive(Clone, Copy, PartialEq)]
 pub struct Timeout {

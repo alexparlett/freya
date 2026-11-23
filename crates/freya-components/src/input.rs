@@ -4,6 +4,10 @@ use std::{
         Ref,
         RefCell,
     },
+    hash::{
+        Hash,
+        Hasher,
+    },
     rc::Rc,
 };
 
@@ -30,9 +34,14 @@ use torin::{
 use tracing::warn;
 
 use crate::{
+    context_menu::ContextMenu,
     cursor_blink::use_cursor_blink,
     define_theme,
     get_theme,
+    menu::{
+        Menu,
+        MenuButton,
+    },
     scrollviews::{
         ScrollConfig,
         ScrollView,
@@ -136,6 +145,12 @@ impl InputValidator {
     }
 }
 
+#[derive(Clone, PartialEq)]
+enum InputValue {
+    Value(WritableSetter<String>),
+    Editor(UseEditable),
+}
+
 /// Small box to write some text.
 ///
 /// ## **Normal**
@@ -183,7 +198,7 @@ impl InputValidator {
 pub struct Input {
     pub(crate) theme_colors: Option<InputColorsThemePartial>,
     pub(crate) theme_layout: Option<InputLayoutThemePartial>,
-    value: Writable<String>,
+    value: InputValue,
     placeholder: Option<Cow<'static, str>>,
     on_validate: Option<EventHandler<InputValidator>>,
     on_submit: Option<EventHandler<String>>,
@@ -209,17 +224,34 @@ pub struct Input {
 }
 
 impl KeyExt for Input {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
 
 impl Input {
-    pub fn new(value: impl Into<Writable<String>>) -> Self {
+    pub fn new(value: impl Into<WritableSetter<String>>) -> Self {
+        Self::with_inner(InputValue::Value(value.into()))
+    }
+
+    /// Use an external editor to control text, cursor, selection and history.
+    ///
+    /// ```rust
+    /// # use freya::{prelude::*, text_edit::*};
+    /// fn app() -> impl IntoElement {
+    ///     let editor = use_editable(String::new, EditableConfig::new);
+    ///     Input::new_with_editor(editor)
+    /// }
+    /// ```
+    pub fn new_with_editor(editor: UseEditable) -> Self {
+        Self::with_inner(InputValue::Editor(editor))
+    }
+
+    fn with_inner(value: InputValue) -> Self {
         Input {
             theme_colors: None,
             theme_layout: None,
-            value: value.into(),
+            value,
             placeholder: None,
             on_validate: None,
             on_submit: None,
@@ -485,21 +517,26 @@ impl Component for Input {
         let mut scroll_controller = use_scroll_controller(ScrollConfig::default);
         let mut status = use_state(InputStatus::default);
         let is_masked = matches!(self.mode, InputMode::Hidden(_));
-        let mut editable = use_editable(
-            || self.value.read().to_string(),
-            move || {
-                let config = EditableConfig::new()
-                    .with_allow_write_clipboard(!is_masked)
-                    .with_select_all_on_double_click(is_masked)
-                    .with_select_all_on_init(self.select_all_on_init);
-                match self.select_on_init {
-                    Some((start, end)) => config.with_select_on_init(start, end),
-                    None => config,
-                }
-            },
-        );
+        let (mut editable, value) = match &self.value {
+            InputValue::Value(value) => (
+                use_editable(
+                    || value.read().to_string(),
+                    || {
+                        let config = EditableConfig::new()
+                            .with_allow_write_clipboard(!is_masked)
+                            .with_select_all_on_double_click(is_masked)
+                            .with_select_all_on_init(self.select_all_on_init);
+                        match self.select_on_init {
+                            Some((start, end)) => config.with_select_on_init(start, end),
+                            None => config,
+                        }
+                    },
+                ),
+                Some(value.clone()),
+            ),
+            InputValue::Editor(editor) => (*editor, None),
+        };
         let mut is_dragging = use_state(|| false);
-        let mut value = self.value.clone();
 
         let theme_colors = match self.style_variant {
             InputStyleVariant::Normal => {
@@ -532,10 +569,9 @@ impl Component for Input {
             ),
         };
 
-        let (mut movement_timeout, cursor_color) =
-            use_cursor_blink(focus() != Focus::Not, theme_colors.color);
-
         let enabled = use_reactive(&self.enabled);
+        let focused = enabled() && focus().is_focused();
+        let (mut movement_timeout, cursor_color) = use_cursor_blink(focused, theme_colors.color);
 
         let multiline_layout = self.multiline;
 
@@ -554,13 +590,12 @@ impl Component for Input {
             _ => None,
         };
 
-        let display_placeholder = value.read().is_empty()
-            && self.placeholder.is_some()
-            && !editable.editor().read().has_preedit();
         let on_validate = self.on_validate.clone();
         let on_submit = self.on_submit.clone();
 
-        if *value.read() != editable.editor().read().committed_text() {
+        if let Some(value) = &value
+            && *value.read() != editable.editor().read().committed_text()
+        {
             let mut editor = editable.editor_mut().write();
             editor.clear_preedit();
             editor.set(&value.read());
@@ -605,6 +640,9 @@ impl Component for Input {
             }
         }
 
+        let display_placeholder = editable.editor().read().committed_text().is_empty()
+            && self.placeholder.is_some()
+            && !editable.editor().read().has_preedit();
         let mode = self.mode;
         let text_align = self.text_align;
         let padding = theme_layout.padding;
@@ -650,10 +688,11 @@ impl Component for Input {
 
             // Minimally reveal the cursor
             if visible_cursor_location.x < visible_start_x {
-                scroll_controller.scroll_to_x(-cursor_location.x as i32);
+                scroll_controller.scroll_to_x(cursor_location.x.into());
             } else if visible_cursor_location.x > visible_start_x + viewport.width() {
-                scroll_controller
-                    .scroll_to_x(-(area.peek().width() - viewport.width()).max(0.0) as i32);
+                scroll_controller.scroll_to_x(
+                    (visible_cursor_location.x + padding.right() - viewport.width()).into(),
+                );
             }
 
             if multiline {
@@ -661,9 +700,9 @@ impl Component for Input {
                 let visible_start_y = viewport.min_y() - area.peek().min_y();
 
                 if visible_cursor_location.y < visible_start_y {
-                    scroll_controller.scroll_to_y(-cursor_location.y as i32);
+                    scroll_controller.scroll_to_y(cursor_location.y.into());
                 } else if cursor_bottom > visible_start_y + viewport.height() {
-                    scroll_controller.scroll_to_y(-(cursor_bottom - viewport.height()) as i32);
+                    scroll_controller.scroll_to_y((cursor_bottom - viewport.height()).into());
                 }
             }
         };
@@ -681,7 +720,49 @@ impl Component for Input {
             .on_pre_key_down
             .clone()
             .unwrap_or_else(|| Callback::new(Self::key_down_default));
-        let multiline = self.multiline;
+        let process_edit = EventHandler::new_current(move |(key, modifiers): (Key, Modifiers)| {
+            movement_timeout.reset();
+            let previous_history_version = editable.editor().peek().editor_history().version;
+            let mut value = value.clone();
+            let on_validate = on_validate.clone();
+            editable.process_event_and_then(
+                EditableEvent::KeyDown {
+                    key: &key,
+                    modifiers,
+                    editor_line: Some(EditorLine::SingleParagraph),
+                    holder: Some(&holder.read()),
+                },
+                move || {
+                    let text = editable.editor().read().committed_text();
+
+                    let apply_change = match &on_validate {
+                        Some(on_validate) => {
+                            let mut editor = editable.editor_mut().write();
+                            let validator = InputValidator::new(text.clone());
+                            on_validate.call(validator.clone());
+                            if !validator.is_valid() {
+                                if let Some(selection) = editor.undo() {
+                                    *editor.selection_mut() = selection;
+                                }
+                                editor.editor_history_mut().clear_redos();
+                            }
+                            validator.is_valid()
+                        }
+                        None => true,
+                    };
+
+                    if apply_change && let Some(value) = &mut value {
+                        value.set(text);
+                    }
+                    if editable.editor().peek().editor_history().version == previous_history_version
+                    {
+                        follow_cursor();
+                    }
+                },
+            );
+        });
+
+        let keyboard_edit = process_edit.clone();
         let on_key_down = move |e: Event<KeyboardEventData>| {
             let key = e.key.clone();
             let modifiers = e.modifiers;
@@ -711,42 +792,58 @@ impl Component for Input {
                 }
                 // On change
                 _ => {
-                    movement_timeout.reset();
-                    let previous_history_version =
-                        editable.editor().peek().editor_history().version;
-                    editable.process_event(EditableEvent::KeyDown {
-                        key: &key,
-                        modifiers,
-                        editor_line: Some(EditorLine::SingleParagraph),
-                        holder: Some(&holder.read()),
-                    });
-                    let text = editable.editor().read().committed_text();
-
-                    let apply_change = match &on_validate {
-                        Some(on_validate) => {
-                            let mut editor = editable.editor_mut().write();
-                            let validator = InputValidator::new(text.clone());
-                            on_validate.call(validator.clone());
-                            if !validator.is_valid() {
-                                if let Some(selection) = editor.undo() {
-                                    *editor.selection_mut() = selection;
-                                }
-                                editor.editor_history_mut().clear_redos();
-                            }
-                            validator.is_valid()
-                        }
-                        None => true,
-                    };
-
-                    if apply_change {
-                        *value.write() = text;
-                    }
-                    if editable.editor().peek().editor_history().version == previous_history_version
-                    {
-                        follow_cursor();
-                    }
+                    keyboard_edit.call((key, modifiers));
                 }
             }
+        };
+
+        let mut on_secondary_down = move |e: Event<PointerEventData>| {
+            e.stop_propagation();
+            a11y_id.request_focus();
+            is_dragging.set_if_modified(false);
+            movement_timeout.reset();
+            let has_selection = editable.editor().peek().get_selection_range().is_some();
+            let menu_button = |title: &'static str, key: Key| {
+                let process_edit = process_edit.clone();
+                let select_all = matches!(&key, Key::Character(shortcut) if shortcut == "a");
+                MenuButton::new()
+                    .child(title)
+                    .on_press(move |event: Event<PressEventData>| {
+                        if select_all {
+                            event.stop_propagation();
+                            event.prevent_default();
+                        }
+                        process_edit.call((key.clone(), Modifiers::ctrl_or_meta()));
+                        ContextMenu::close();
+                        a11y_id.request_focus();
+                    })
+            };
+            ContextMenu::open_from_down(
+                Menu::new()
+                    .children(
+                        [
+                            (
+                                "Cut",
+                                Key::Character("x".into()),
+                                has_selection && !is_masked,
+                            ),
+                            ("Copy", Key::Character("c".into()), !is_masked),
+                            ("Paste", Key::Character("v".into()), true),
+                            ("Delete", Key::Named(NamedKey::Delete), has_selection),
+                        ]
+                        .into_iter()
+                        .filter(|(_, _, visible)| *visible)
+                        .map(|(title, key, _)| menu_button(title, key)),
+                    )
+                    .child(
+                        rect()
+                            .margin(Gaps::new(4., 0., 4., 0.))
+                            .height(Size::px(1.))
+                            .width(Size::fill_minimum())
+                            .background(theme_colors.border_fill),
+                    )
+                    .child(menu_button("Select all", Key::Character("a".into()))),
+            );
         };
 
         let on_key_up = move |e: Event<KeyboardEventData>| {
@@ -754,22 +851,14 @@ impl Component for Input {
             editable.process_event(EditableEvent::KeyUp { key: &e.key });
         };
 
-        let on_input_focus_press = move |e: Event<FocusPressEventData>| {
-            e.stop_propagation();
-            e.prevent_default();
-            if cfg!(target_os = "android") {
-                if a11y_id.is_focused() {
-                    // Require a second press to enabling dragging on Android
-                    is_dragging.set_if_modified(true);
-                }
-            } else {
+        let mut focus_input = move |location| {
+            ContextMenu::close();
+            if !cfg!(target_os = "android") || a11y_id.is_focused() {
                 is_dragging.set_if_modified(true);
             }
             movement_timeout.reset();
+
             if !display_placeholder {
-                let text_area = area.read().to_f64();
-                let global_location = e.global_location().clamp(text_area.min(), text_area.max());
-                let location = (global_location - text_area.min()).to_point();
                 editable.process_event(EditableEvent::Down {
                     location,
                     editor_line: EditorLine::SingleParagraph,
@@ -779,26 +868,18 @@ impl Component for Input {
             a11y_id.request_focus();
         };
 
+        let mut on_input_focus_press = move |e: Event<PointerEventData>| {
+            e.stop_propagation();
+            e.prevent_default();
+            let text_area = area.read().to_f64();
+            let global_location = e.global_location().clamp(text_area.min(), text_area.max());
+            focus_input((global_location - text_area.min()).to_point());
+        };
+
         let on_focus_press = move |e: Event<FocusPressEventData>| {
             e.stop_propagation();
             e.prevent_default();
-            if cfg!(target_os = "android") {
-                if a11y_id.is_focused() {
-                    // Require a second press to enabling dragging on Android
-                    is_dragging.set_if_modified(true);
-                }
-            } else {
-                is_dragging.set_if_modified(true);
-            }
-            movement_timeout.reset();
-            if !display_placeholder {
-                editable.process_event(EditableEvent::Down {
-                    location: e.element_location(),
-                    editor_line: EditorLine::SingleParagraph,
-                    holder: &holder.read(),
-                });
-            }
-            a11y_id.request_focus();
+            focus_input(e.element_location());
         };
 
         let on_global_pointer_move = move |e: Event<PointerEventData>| {
@@ -875,7 +956,7 @@ impl Component for Input {
         let on_paragraph_sized = move |e: Event<SizedEventData>| {
             let viewport = viewport_area();
             if viewport.width() > 0. {
-                scroll_controller.apply_layout(e.area.size, viewport);
+                scroll_controller.apply_layout(e.area.size.to_f64(), viewport.size.to_f64());
             }
 
             let text_size_changed = area.peek().size != e.area.size;
@@ -885,7 +966,7 @@ impl Component for Input {
             }
         };
 
-        let (background, cursor_index, text_selection) = if enabled() && focus() != Focus::Not {
+        let (background, cursor_index, text_selection) = if focused {
             (
                 theme_colors.focus_background,
                 Some(editable.editor().read().cursor_pos()),
@@ -900,7 +981,7 @@ impl Component for Input {
             (theme_colors.background, None, None)
         };
 
-        let border = if focus().is_focused() {
+        let border = if focused {
             Border::new()
                 .fill(theme_colors.focus_border_fill)
                 .width(2.)
@@ -932,7 +1013,7 @@ impl Component for Input {
             theme_colors.color
         };
 
-        let value = self.value.read();
+        let value = editable.editor().read().committed_text();
         let a11y_text: Cow<str> = match (self.mode, &self.placeholder) {
             (_, Some(ph)) if display_placeholder => Cow::Borrowed(ph.as_ref()),
             (InputMode::Hidden(ch), _) => Cow::Owned(ch.to_string().repeat(value.len())),
@@ -947,6 +1028,7 @@ impl Component for Input {
 
         rect()
             .a11y_id(a11y_id)
+            .a11y_enabled(self.enabled)
             .a11y_focusable(self.enabled)
             .a11y_auto_focus(self.auto_focus)
             .a11y_alt(a11y_text)
@@ -954,7 +1036,16 @@ impl Component for Input {
             .maybe(self.enabled, |el| {
                 el.on_key_up(on_key_up)
                     .on_key_down(on_key_down)
-                    .on_focus_press(on_input_focus_press)
+                    .on_pointer_down(move |e: Event<PointerEventData>| {
+                        if matches!(e.data(), PointerEventData::Mouse(mouse) if mouse.button == Some(MouseButton::Right)) {
+                            on_secondary_down(e);
+                        } else if !cfg!(target_os = "android") && match e.data() {
+                            PointerEventData::Mouse(mouse) => mouse.button == Some(MouseButton::Left),
+                            PointerEventData::Touch(_) => true,
+                        } {
+                            on_input_focus_press(e);
+                        }
+                    })
                     .on_ime_preedit(on_ime_preedit)
                     .on_pointer_press(on_pointer_press)
                     .on_global_pointer_up(on_global_pointer_up)
@@ -1070,6 +1161,13 @@ impl Component for Input {
     }
 
     fn render_key(&self) -> DiffKey {
-        self.key.clone().or(self.default_key())
+        let key = self.key.clone().or(self.default_key());
+        let mut hasher = std::hash::DefaultHasher::new();
+        key.hash(&mut hasher);
+        std::mem::discriminant(&self.value).hash(&mut hasher);
+        match key {
+            DiffKey::DefaultU64(_) => DiffKey::DefaultU64(hasher.finish()),
+            _ => DiffKey::U64(hasher.finish()),
+        }
     }
 }

@@ -1,3 +1,8 @@
+use alloc::{
+    collections::VecDeque,
+    vec::Vec,
+};
+
 use crate::{
     EmmitableEvent,
     NameOfEvent,
@@ -34,7 +39,7 @@ impl<Key: NodeKey, Name: NameOfEvent, Emmitable: EmmitableEvent, Source: SourceE
 
 pub trait EventsExecutor
 where
-    Self: std::marker::Sized,
+    Self: core::marker::Sized,
 {
     type Name: NameOfEvent;
     type Key: NodeKey;
@@ -59,19 +64,18 @@ impl<T: EventsExecutor + private::Sealed> EventsExecutorRunner for T {
         mut self,
         nodes_state: &mut NodesState<Self::Key>,
         ProcessedEvents {
-            mut emmitable_events,
+            emmitable_events,
             flattened_potential_events,
             mut nodes_states_update,
         }: ProcessedEvents<Self::Key, Self::Name, Self::Emmitable, Self::Source>,
     ) {
+        let mut emmitable_events: VecDeque<Self::Emmitable> = emmitable_events.into();
         let mut processed_events = Vec::<Self::Emmitable>::new();
 
         #[cfg(debug_assertions)]
         tracing::info!("Processing {} Tree events", emmitable_events.len());
 
-        while !emmitable_events.is_empty() {
-            let emmitable_event = emmitable_events.remove(0);
-
+        while let Some(emmitable_event) = emmitable_events.pop_front() {
             let default_action_enabled = self.emit_event(emmitable_event.clone());
 
             if !default_action_enabled {
@@ -112,7 +116,7 @@ impl<T: EventsExecutor + private::Sealed> EventsExecutorRunner for T {
 
 pub trait EventsExecutorRunner: private::Sealed
 where
-    Self: std::marker::Sized,
+    Self: core::marker::Sized,
 {
     type Name: NameOfEvent;
     type Key: NodeKey;

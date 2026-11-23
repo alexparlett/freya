@@ -9,14 +9,14 @@ use freya::{
 };
 
 fn main() {
-    launch(LaunchConfig::new().with_future(|proxy| async move {
+    launch(LaunchConfig::new().with_task(|proxy| async move {
         let monitors: Vec<MonitorHandle> = proxy
             .post_callback(|ctx| ctx.active_event_loop.available_monitors().collect())
             .await
             .unwrap();
 
         for monitor in monitors {
-            let position = monitor.position();
+            let position = monitor.position().unwrap_or_default();
 
             let _ = proxy
                 .post_callback(move |ctx| {
@@ -33,8 +33,11 @@ fn main() {
 
 fn app(monitor: MonitorHandle) -> impl IntoElement {
     let name = monitor.name().unwrap_or_else(|| "Unknown".into());
-    let size = monitor.size();
-    let position = monitor.position();
+    let size = monitor
+        .current_video_mode()
+        .map(|mode| mode.size())
+        .unwrap_or_default();
+    let position = monitor.position().unwrap_or_default();
 
     rect()
         .expanded()

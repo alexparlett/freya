@@ -217,8 +217,8 @@ impl<Q: MutationCapability> MutationsStorage<Q> {
         let mock: MutationMock<Q> = Rc::new(move |keys| Box::pin(mock(keys)));
 
         Self {
-            storage: State::create_in_scope(HashMap::default(), ScopeId::ROOT),
-            mock: State::create_in_scope(Some(mock), ScopeId::ROOT),
+            storage: State::create_global(HashMap::default()),
+            mock: State::create_global(Some(mock)),
         }
     }
 
@@ -275,7 +275,7 @@ impl<Q: MutationCapability> MutationsStorage<Q> {
             return;
         }
 
-        *clean_task = Some(spawn_forever(async move {
+        *clean_task = Some(spawn_in_window(async move {
             // Wait as long as the clean time is configured
             timer(mutation.clean_time).await;
 
@@ -467,7 +467,9 @@ impl<Q: MutationCapability> UseMutation<Q> {
         };
 
         // Run the mutation
-        spawn_forever(async move { MutationsStorage::run(&mutation, &mutation_data, keys).await });
+        spawn_in_window(
+            async move { MutationsStorage::run(&mutation, &mutation_data, keys).await },
+        );
     }
 }
 

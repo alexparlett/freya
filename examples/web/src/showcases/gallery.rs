@@ -4,10 +4,7 @@ use freya::{
     prelude::*,
 };
 
-use crate::showcases::{
-    DemoGrid,
-    inline_menu,
-};
+use crate::showcases::DemoGrid;
 
 const RUST_LOGO: &[u8] = include_bytes!("../rust_logo.png");
 const PREVIEW_URL: &str =
@@ -34,18 +31,14 @@ demos! {
     }
 
     SwitchDemo => "Switch" {
-        let mut toggled = use_state(|| true);
+        let toggled = use_state(|| true);
 
         rect()
             .spacing(12.)
             .cross_align(Alignment::center())
-            .child(
-                Switch::new()
-                    .toggled(toggled())
-                    .on_toggle(move |_| toggled.toggle()),
-            )
+            .child(Switch::new(toggled))
             .child(if toggled() { "On" } else { "Off" })
-            .child(Switch::new().toggled(false).enabled(false))
+            .child(Switch::new(WritableSetter::new(false, |_| {})).enabled(false))
             .child("Disabled")
     }
 
@@ -185,7 +178,8 @@ demos! {
     MenuDemo => "Menu" {
         let mut selected = use_state(|| 0usize);
 
-        inline_menu()
+        MenuContainer::new()
+            .layer(0)
             .children(["Open", "Save", "Export"].into_iter().enumerate().map(
                 |(index, name)| {
                     MenuItem::new()
@@ -291,11 +285,33 @@ demos! {
         let mut selected = use_state(|| None::<CalendarDate>);
         let mut view_date = use_state(CalendarDate::now);
 
-        Calendar::new()
-            .selected(selected())
-            .view_date(view_date())
-            .on_change(move |date| selected.set(Some(date)))
-            .on_view_change(move |date| view_date.set(date))
+        rect().width(Size::px(250.)).map(CalendarMonth::new(view_date(), selected(), WeekStart::Monday), |el, month| {
+            let previous_month = month.previous_month;
+            let next_month = month.next_month;
+            let title = format!("{:02}/{}", month.first_day.month, month.first_day.year);
+
+            el.child(rect().horizontal().content(Content::flex()).width(Size::fill())
+                .child(Button::new().on_press(move |_| view_date.set(previous_month)).child("‹"))
+                .child(label().width(Size::flex(1.)).text_align(TextAlign::Center).text(title))
+                .child(Button::new().on_press(move |_| view_date.set(next_month)).child("›")))
+                .child(rect().horizontal().content(Content::wrap())
+                    .children(month.weekdays.iter().map(|weekday| {
+                        rect().width(Size::px(35.)).height(Size::px(36.)).center()
+                            .child(weekday.to_string())
+                    })))
+                .child(CalendarGrid::new(month, move |day| {
+                    Button::new()
+                        .flat()
+                        .padding(0.)
+                        .enabled(day.in_month)
+                        .width(Size::px(35.))
+                        .height(Size::px(36.))
+                        .maybe(day.selected, |el| el.filled())
+                        .on_press(move |_| selected.set(Some(day.date)))
+                        .child(day.date.day.to_string())
+                        .into()
+                }))
+        })
     }
 
     ColorPickerDemo => "ColorPicker" {
@@ -367,10 +383,10 @@ demos! {
                             .horizontal()
                             .cross_align(Alignment::Center)
                             .on_press(move |_| ascending.toggle())
-                            .child(ArrowIcon::new().margin(Gaps::new(0., 10., 0., 0.)).rotate(
+                            .child("Name")
+                            .child(ArrowIcon::new().margin((0., 0., 0., 8.)).rotate(
                                 if ascending() { 0. } else { 180. },
-                            ))
-                            .child("Name"),
+                            )),
                     )
                     .child("Type"),
             )

@@ -9,8 +9,6 @@ fn main() {
 }
 
 fn app() -> impl IntoElement {
-    // use_init_theme(|| dark_theme());
-
     rect()
         .child(
             ScrollView::new()
@@ -23,16 +21,19 @@ fn app() -> impl IntoElement {
                 }))),
         )
         .child(
-            ScrollView::new().height(Size::percent(50.)).child(
-                rect()
-                    .direction(Direction::Horizontal)
-                    .spacing(6.)
-                    .children((0..30).map(|_| {
-                        rect()
-                            .width(Size::px(80.))
-                            .height(Size::fill())
-                            .background((0, 119, 182))
-                    })),
-            ),
+            ScrollView::new()
+                .auto_hide_scrollbars(false)
+                .height(Size::percent(50.))
+                .child(
+                    rect()
+                        .direction(Direction::Horizontal)
+                        .spacing(6.)
+                        .children((0..30).map(|_| {
+                            rect()
+                                .width(Size::px(80.))
+                                .height(Size::fill())
+                                .background((0, 119, 182))
+                        })),
+                ),
         )
 }

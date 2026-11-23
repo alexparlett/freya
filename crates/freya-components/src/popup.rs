@@ -132,7 +132,7 @@ pub struct Popup {
 }
 
 impl KeyExt for Popup {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -161,7 +161,7 @@ impl Popup {
 }
 
 impl ChildrenExt for Popup {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
@@ -281,58 +281,101 @@ impl Component for Popup {
     }
 }
 
+define_theme! {
+    %[component]
+    pub PopupTitle {
+        %[fields]
+        font_size: f32,
+    }
+}
+
+define_theme! {
+    %[component]
+    pub PopupContent {
+        %[fields]
+        font_size: f32,
+    }
+}
+
 /// Popup title.
 #[derive(PartialEq)]
 pub struct PopupTitle {
+    pub(crate) theme: Option<PopupTitleThemePartial>,
     text: Readable<String>,
+    key: DiffKey,
 }
 
 impl PopupTitle {
     pub fn new(text: impl Into<Readable<String>>) -> Self {
-        Self { text: text.into() }
+        Self {
+            theme: None,
+            text: text.into(),
+            key: DiffKey::None,
+        }
+    }
+}
+
+impl KeyExt for PopupTitle {
+    fn key_mut(&mut self) -> &mut DiffKey {
+        &mut self.key
     }
 }
 
 impl Component for PopupTitle {
     fn render(&self) -> impl IntoElement {
-        rect().font_size(18.).padding(8.).child(
+        let theme = get_theme!(&self.theme, PopupTitleThemePreference, "popup_title");
+
+        rect().font_size(theme.font_size).padding(8.).child(
             label()
                 .a11y_role(AccessibilityRole::TitleBar)
                 .width(Size::fill())
                 .text(self.text.read().to_string()),
         )
     }
+
+    fn render_key(&self) -> DiffKey {
+        self.key.clone().or(self.default_key())
+    }
 }
 
 /// Popup content wrapper.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct PopupContent {
+    pub(crate) theme: Option<PopupContentThemePartial>,
     children: Vec<Element>,
-}
-impl Default for PopupContent {
-    fn default() -> Self {
-        Self::new()
-    }
+    key: DiffKey,
 }
 
 impl PopupContent {
     pub fn new() -> Self {
-        Self { children: vec![] }
+        Self::default()
+    }
+}
+
+impl KeyExt for PopupContent {
+    fn key_mut(&mut self) -> &mut DiffKey {
+        &mut self.key
     }
 }
 
 impl ChildrenExt for PopupContent {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
 
 impl Component for PopupContent {
     fn render(&self) -> impl IntoElement {
+        let theme = get_theme!(&self.theme, PopupContentThemePreference, "popup_content");
+
         rect()
-            .font_size(15.)
+            .font_size(theme.font_size)
             .padding(8.)
             .children(self.children.clone())
+    }
+
+    fn render_key(&self) -> DiffKey {
+        self.key.clone().or(self.default_key())
     }
 }
 
@@ -355,7 +398,7 @@ impl PopupButtons {
 }
 
 impl ChildrenExt for PopupButtons {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }

@@ -5,6 +5,7 @@ use std::{
 
 use accesskit::{
     Action,
+    ActionRequest,
     Affine,
     Node,
     Rect,
@@ -46,6 +47,7 @@ use crate::{
         FontSlant,
         TextAlign,
         TextDecoration,
+        TouchPhase,
         WheelEventData,
         WheelSource,
     },
@@ -58,9 +60,6 @@ pub struct AccessibilityTree {
     pub map: FxHashMap<AccessibilityId, NodeId>,
     // Current focused Accessibility Node.
     pub focused_id: AccessibilityId,
-    /// Whether [`AccessibilityTree::process_updates`] builds the changed nodes. Off, it keeps
-    /// only the id map and focus, for a host with no assistive technology listening.
-    pub export: bool,
 }
 
 impl Default for AccessibilityTree {
@@ -74,7 +73,6 @@ impl AccessibilityTree {
         Self {
             focused_id,
             map: FxHashMap::default(),
-            export: true,
         }
     }
 
@@ -82,8 +80,62 @@ impl AccessibilityTree {
         self.map.get(&self.focused_id).cloned()
     }
 
+    /// Dispatch an action requested by assistive technology.
+    pub fn handle_action(
+        &self,
+        request: ActionRequest,
+        tree: &mut Tree,
+        events_sender: &futures_channel::mpsc::UnboundedSender<EventsChunk>,
+    ) -> bool {
+        if request.target_tree != TreeId::ROOT {
+            return false;
+        }
+        let Some(node_id) = self.map.get(&request.target_node).copied() else {
+            return false;
+        };
+        let Some(element) = tree.elements.get(&node_id) else {
+            return false;
+        };
+        let mut builder = element.accessibility().builder.clone();
+        element.finish_accessibility(&mut builder);
+        if builder.is_disabled() {
+            return false;
+        }
+        match request.action {
+            Action::Focus => {
+                if !element.accessibility().a11y_focusable.is_enabled() {
+                    return false;
+                }
+                tree.accessibility_diff
+                    .request_focus(AccessibilityFocusStrategy::Node(request.target_node));
+                true
+            }
+            Action::Blur => {
+                if self.focused_id == request.target_node {
+                    tree.accessibility_diff
+                        .request_focus(AccessibilityFocusStrategy::Node(ACCESSIBILITY_ROOT_ID));
+                }
+                true
+            }
+            Action::ScrollIntoView => {
+                self.scroll_to(node_id, tree, events_sender);
+                true
+            }
+            _ => events_sender
+                .unbounded_send(EventsChunk::Batch(vec![EmmitableEvent {
+                    name: EventName::AccessibilityAction,
+                    source_event: EventName::AccessibilityAction,
+                    node_id,
+                    data: EventType::AccessibilityAction(request),
+                    bubbles: true,
+                }]))
+                .is_ok(),
+        }
+    }
+
     /// Initialize the Accessibility Tree
     pub fn init(&mut self, tree: &mut Tree, title: &str) -> TreeUpdate {
+        let requested_focus = tree.accessibility_diff.requested_focus.take();
         tree.accessibility_diff.clear();
 
         let mut nodes = vec![];
@@ -102,14 +154,18 @@ impl AccessibilityTree {
             nodes.len()
         );
 
-        if !self.map.contains_key(&self.focused_id) {
+        if !self.can_focus(self.focused_id, tree) {
             self.focused_id = ACCESSIBILITY_ROOT_ID;
+        }
+
+        if let Some(requested_focus) = requested_focus {
+            self.focus_node_with_strategy(requested_focus, tree);
         }
 
         TreeUpdate {
             tree_id: TreeId::ROOT,
             nodes,
-            tree: Some(accesskit::Tree::new(ACCESSIBILITY_ROOT_ID)),
+            tree: Some(accesskit::TreeInfo::new(ACCESSIBILITY_ROOT_ID)),
             focus: self.focused_id,
         }
     }
@@ -122,17 +178,20 @@ impl AccessibilityTree {
         events_sender: &futures_channel::mpsc::UnboundedSender<EventsChunk>,
         title: &str,
     ) -> TreeUpdate {
+        let updated_nodes = self.prepare_updates(tree, events_sender);
+        self.build_update(tree, title, updated_nodes)
+    }
+
+    /// Update focus and node mappings without constructing an AccessKit update.
+    pub fn prepare_updates(
+        &mut self,
+        tree: &mut Tree,
+        events_sender: &futures_channel::mpsc::UnboundedSender<EventsChunk>,
+    ) -> FxHashSet<NodeId> {
         let requested_focus = tree.accessibility_diff.requested_focus.take();
-        let removed_ids = tree
-            .accessibility_diff
-            .removed
-            .drain()
-            .collect::<FxHashMap<_, _>>();
-        let mut added_or_updated_ids = tree
-            .accessibility_diff
-            .added_or_updated
-            .drain()
-            .collect::<FxHashSet<_>>();
+        let removed_ids = std::mem::take(&mut tree.accessibility_diff.removed);
+        let mut added_or_updated_ids =
+            std::mem::take(&mut tree.accessibility_diff.added_or_updated);
 
         #[cfg(debug_assertions)]
         if !removed_ids.is_empty() || !added_or_updated_ids.is_empty() {
@@ -165,19 +224,10 @@ impl AccessibilityTree {
             added_or_updated_ids.insert(*node_parent_id);
         }
 
-        // Create the updated nodes
-        let mut nodes = Vec::new();
-        for node_id in added_or_updated_ids.into_iter().filter(|_| self.export) {
-            let accessibility_state = tree.accessibility_state.get(&node_id).unwrap();
-            let layout_node = tree.layout.get(&node_id).unwrap();
-            let accessibility_node = Self::create_node(node_id, layout_node, tree, title);
-            nodes.push((accessibility_state.a11y_id, accessibility_node));
-        }
-
         let has_request_focus = requested_focus.is_some();
 
-        // Fallback the focused id to the root if the focused node no longer exists
-        if !self.map.contains_key(&self.focused_id) {
+        // Return focus to the root when the focused node is removed or disabled.
+        if !self.can_focus(self.focused_id, tree) {
             self.focused_id = ACCESSIBILITY_ROOT_ID;
         }
 
@@ -200,10 +250,30 @@ impl AccessibilityTree {
             self.scroll_to(node_id, tree, events_sender);
         }
 
+        added_or_updated_ids
+    }
+
+    /// Build an AccessKit update for nodes prepared by `prepare_updates`.
+    pub fn build_update(
+        &self,
+        tree: &Tree,
+        title: &str,
+        updated_nodes: impl IntoIterator<Item = NodeId>,
+    ) -> TreeUpdate {
+        let nodes = updated_nodes
+            .into_iter()
+            .map(|node_id| {
+                let accessibility_state = &tree.accessibility_state[&node_id];
+                let layout_node = tree.layout.get(&node_id).unwrap();
+                let node = Self::create_node(node_id, layout_node, tree, title);
+                (accessibility_state.a11y_id, node)
+            })
+            .collect();
+
         TreeUpdate {
             tree_id: TreeId::ROOT,
             nodes,
-            tree: Some(accesskit::Tree::new(ACCESSIBILITY_ROOT_ID)),
+            tree: Some(accesskit::TreeInfo::new(ACCESSIBILITY_ROOT_ID)),
             focus: self.focused_id,
         }
     }
@@ -235,6 +305,16 @@ impl AccessibilityTree {
         }
     }
 
+    fn can_focus(&self, id: AccessibilityId, tree: &Tree) -> bool {
+        self.map.get(&id).is_some_and(|node_id| {
+            id == ACCESSIBILITY_ROOT_ID
+                || tree
+                    .accessibility_state
+                    .get(node_id)
+                    .is_some_and(|state| state.a11y_focusable != Focusable::Disabled)
+        })
+    }
+
     /// Focus a Node given the strategy.
     pub fn focus_node_with_strategy(
         &mut self,
@@ -243,10 +323,11 @@ impl AccessibilityTree {
     ) {
         let modal = Self::active_modal(tree);
         if let AccessibilityFocusStrategy::Node(id) = strategy {
-            if self
-                .map
-                .get(&id)
-                .is_some_and(|node| Self::inside_modal(tree, *node, modal))
+            if self.can_focus(id, tree)
+                && self
+                    .map
+                    .get(&id)
+                    .is_some_and(|node| Self::inside_modal(tree, *node, modal))
             {
                 self.focused_id = id;
             }
@@ -394,6 +475,7 @@ impl AccessibilityTree {
                         delta_y as f64,
                         WheelSource::Custom,
                         timestamp,
+                        TouchPhase::Moved,
                         CursorPoint::default(),
                         CursorPoint::default(),
                     )),
@@ -477,6 +559,7 @@ impl AccessibilityTree {
         // to focus the current element if it supports it.
         if accessibility_data.a11y_focusable.is_enabled() {
             accessibility_data.builder.add_action(Action::Focus);
+            accessibility_data.builder.add_action(Action::Blur);
         }
 
         let builder = &mut accessibility_data.builder;

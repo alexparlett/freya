@@ -19,6 +19,7 @@ plot = ["freya/plot"]
 members = [
   "./crates/freya",
   "./crates/freya-core",
+  "./crates/tiny-diff",
   "./crates/torin",
   "./crates/ragnarok",
   "./crates/freya-clipboard",
@@ -28,6 +29,8 @@ members = [
   "./crates/freya-video",
   "./crates/freya-markdown",
   "./crates/pathgraph",
+  "./crates/tiny-cache",
+  "./crates/tiny-notify",
   "./crates/freya-animation",
   "./crates/freya-router",
   "./crates/freya-router-macro",
@@ -64,43 +67,49 @@ members = [
   "./examples/feature_tray_radio_state",
 ]
 
+[workspace.package]
+version = "0.6.0-alpha.2"
+
 [workspace.metadata.release]
 rate-limit.existing-packages = 40
 
 [workspace.dependencies]
-freya = { path = "./crates/freya", version = "0.5.0-rc.8" }
-freya-core = { path = "./crates/freya-core", version = "0.5.0-rc.8" }
-torin = { path = "./crates/torin", version = "0.5.0-rc.8" }
-ragnarok = { path = "./crates/ragnarok", version = "0.5.0-rc.8" }
-freya-clipboard = { path = "./crates/freya-clipboard", version = "0.5.0-rc.8" }
-freya-edit = { path = "./crates/freya-edit", version = "0.5.0-rc.8" }
-freya-winit = { path = "./crates/freya-winit", version = "0.5.0-rc.8", default-features = false }
-freya-components = { path = "./crates/freya-components", version = "0.5.0-rc.8" }
-freya-video = { path = "./crates/freya-video", version = "0.5.0-rc.8" }
-freya-markdown = { path = "./crates/freya-markdown", version = "0.5.0-rc.8" }
-pathgraph = { path = "./crates/pathgraph/", version = "0.5.0-rc.8" }
-freya-animation = { path = "./crates/freya-animation", version = "0.5.0-rc.8" }
-freya-router = { path = "./crates/freya-router", version = "0.5.0-rc.8" }
-freya-router-macro = { path = "./crates/freya-router-macro", version = "0.5.0-rc.8" }
-freya-testing = { path = "./crates/freya-testing", version = "0.5.0-rc.8" }
-freya-i18n = { path = "./crates/freya-i18n", version = "0.5.0-rc.8" }
-freya-metrics-plugin = { path = "./crates/freya-metrics-plugin", version = "0.5.0-rc.8" }
-freya-borderless-plugin = { path = "./crates/freya-borderless-plugin", version = "0.5.0-rc.8" }
-freya-radio = { path = "./crates/freya-radio", version = "0.5.0-rc.8" }
-freya-engine = { path = "./crates/freya-engine", version = "0.5.0-rc.8" }
-freya-devtools = { path = "./crates/freya-devtools", version = "0.5.0-rc.8" }
-freya-icons = { path = "./crates/freya-icons", version = "0.5.0-rc.8" }
-freya-sdk = { path = "./crates/freya-sdk", version = "0.5.0-rc.8" }
-freya-material-design = { path = "./crates/freya-material-design", version = "0.5.0-rc.8" }
-freya-plotters-backend = { path = "./crates/freya-plotters-backend", version = "0.5.0-rc.8" }
-freya-query = { path = "./crates/freya-query", version = "0.5.0-rc.8" }
-freya-html = { path = "./crates/freya-html", version = "0.5.0-rc.8" }
-freya-terminal = { path = "./crates/freya-terminal", version = "0.5.0-rc.8", default-features = false }
-freya-code-editor = { path = "./crates/freya-code-editor", version = "0.5.0-rc.8" }
-freya-camera = { path = "./crates/freya-camera", version = "0.5.0-rc.8" }
-freya-android = { path = "./crates/freya-android", version = "0.5.0-rc.8" }
-freya-web = { path = "./crates/freya-web", version = "0.5.0-rc.8" }
-freya-embed = { path = "./crates/freya-embed", version = "0.5.0-rc.8" }
+tiny-diff = { path = "./crates/tiny-diff", version = "0.6.0-alpha.2" }
+freya = { path = "./crates/freya", version = "0.6.0-alpha.2" }
+freya-core = { path = "./crates/freya-core", version = "0.6.0-alpha.2" }
+torin = { path = "./crates/torin", version = "0.6.0-alpha.2" }
+ragnarok = { path = "./crates/ragnarok", version = "0.6.0-alpha.2" }
+freya-clipboard = { path = "./crates/freya-clipboard", version = "0.6.0-alpha.2" }
+freya-edit = { path = "./crates/freya-edit", version = "0.6.0-alpha.2" }
+freya-winit = { path = "./crates/freya-winit", version = "0.6.0-alpha.2", default-features = false }
+freya-components = { path = "./crates/freya-components", version = "0.6.0-alpha.2" }
+freya-video = { path = "./crates/freya-video", version = "0.6.0-alpha.2" }
+freya-markdown = { path = "./crates/freya-markdown", version = "0.6.0-alpha.2" }
+pathgraph = { path = "./crates/pathgraph/", version = "0.6.0-alpha.2" }
+tiny-cache = { path = "./crates/tiny-cache", version = "0.6.0-alpha.2" }
+tiny-notify = { path = "./crates/tiny-notify", version = "0.6.0-alpha.2" }
+freya-animation = { path = "./crates/freya-animation", version = "0.6.0-alpha.2" }
+freya-router = { path = "./crates/freya-router", version = "0.6.0-alpha.2" }
+freya-router-macro = { path = "./crates/freya-router-macro", version = "0.6.0-alpha.2" }
+freya-testing = { path = "./crates/freya-testing", version = "0.6.0-alpha.2" }
+freya-i18n = { path = "./crates/freya-i18n", version = "0.6.0-alpha.2" }
+freya-metrics-plugin = { path = "./crates/freya-metrics-plugin", version = "0.6.0-alpha.2" }
+freya-borderless-plugin = { path = "./crates/freya-borderless-plugin", version = "0.6.0-alpha.2" }
+freya-radio = { path = "./crates/freya-radio", version = "0.6.0-alpha.2" }
+freya-engine = { path = "./crates/freya-engine", version = "0.6.0-alpha.2" }
+freya-devtools = { path = "./crates/freya-devtools", version = "0.6.0-alpha.2" }
+freya-icons = { path = "./crates/freya-icons", version = "0.6.0-alpha.2" }
+freya-sdk = { path = "./crates/freya-sdk", version = "0.6.0-alpha.2" }
+freya-material-design = { path = "./crates/freya-material-design", version = "0.6.0-alpha.2" }
+freya-plotters-backend = { path = "./crates/freya-plotters-backend", version = "0.6.0-alpha.2" }
+freya-query = { path = "./crates/freya-query", version = "0.6.0-alpha.2" }
+freya-html = { path = "./crates/freya-html", version = "0.6.0-alpha.2" }
+freya-terminal = { path = "./crates/freya-terminal", version = "0.6.0-alpha.2", default-features = false }
+freya-code-editor = { path = "./crates/freya-code-editor", version = "0.6.0-alpha.2" }
+freya-camera = { path = "./crates/freya-camera", version = "0.6.0-alpha.2" }
+freya-android = { path = "./crates/freya-android", version = "0.6.0-alpha.2" }
+freya-web = { path = "./crates/freya-web", version = "0.6.0-alpha.2" }
+freya-embed = { path = "./crates/freya-embed", version = "0.6.0-alpha.2" }
 mundy = { version = "0.2.3", default-features = false, features = [
   "async-io",
   "callback",
@@ -131,7 +140,7 @@ serde_json = "1"
 url = "2.5"
 linkify = "0.11"
 open = "5.1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 
 # Animations
 easer = "0.3.0"
@@ -147,7 +156,7 @@ euclid = "0.22.9"
 itertools = "0.14.0"
 
 # Rendering
-freya-skia-safe = { version = "=0.100.0-beta.1", features = [
+freya-skia-safe = { version = "0.105.0-beta.1", features = [
   "textlayout",
   "svg",
   "webp",
@@ -157,16 +166,17 @@ rfd = "0.17"
 
 # Desktop renderer
 raw-window-handle = "0.6.0"
-winit = "0.30.13"
+winit = "0.31.0-beta.4"
 
 # Tray
-tray-icon = "0.21"
-muda = "0.17"
+tray-icon = { version = "0.26.1", default-features = false, features = [
+  "ksni",
+] }
+muda = { version = "0.21", default-features = false }
 
 # OpenGL
 gl = "0.14.0"
 glutin = "0.32.0"
-glutin-winit = "0.5.0"
 
 # Vulkan
 ash = "^0.38"
@@ -177,11 +187,11 @@ ash-window = "0.13.0"
 softbuffer = { git = "https://github.com/rust-windowing/softbuffer", rev = "9a7c9ca" }
 
 # accessibility
-accesskit = "0.24.0"
-accesskit_winit = "0.33.0"
+accesskit = "0.25.1"
+accesskit_xplat = "0.2.1"
 
 # Performance
-hotpath = "0.28"
+hotpath = "0.32.1"
 
 # Errors
 anyhow = "1.0.100"
@@ -191,7 +201,7 @@ thiserror = "2.0.17"
 image = "0.25.6"
 
 # Video
-ffmpeg-sidecar = "2.3"
+ffmpeg-sidecar = "2.7"
 rodio = { version = "0.20", default-features = false }
 
 # SDK

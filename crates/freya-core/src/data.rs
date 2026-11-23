@@ -88,11 +88,13 @@ impl DerefMut for LayoutData {
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct EffectData {
     pub cursor: Option<CursorIcon>,
+    pub cursor_visible: Option<bool>,
     pub overflow: Overflow,
     pub rotation: Option<f32>,
     pub scale: Option<Scale>,
     pub transform_origin: TransformOrigin,
     pub opacity: Option<f32>,
+    pub mask: Option<Fill>,
     pub blur: Option<f32>,
     pub scrollable: bool,
     pub interactive: Interactive,
@@ -170,16 +172,18 @@ impl Default for TextStyleState {
 impl TextStyleState {
     pub fn from_data(parent: &TextStyleState, data: &TextStyleData) -> Self {
         let color = data.color.as_ref().unwrap_or(&parent.color).clone();
-
-        let text_align = data.text_align.unwrap_or_default();
-        let text_height = data.text_height.unwrap_or_default();
-        let text_overflow = data.text_overflow.clone().unwrap_or_default();
-        let text_shadows = data.text_shadows.clone();
-        let text_decoration = data.text_decoration.unwrap_or_default();
-        let text_decoration_style = data.text_decoration_style.unwrap_or_default();
-        let text_decoration_color = data.text_decoration_color;
-
-        // Font values can be inherited
+        let text_align = data.text_align.unwrap_or(parent.text_align);
+        let text_height = data.text_height.unwrap_or(parent.text_height);
+        let text_decoration = data.text_decoration.unwrap_or(parent.text_decoration);
+        let text_decoration_style = data
+            .text_decoration_style
+            .unwrap_or(parent.text_decoration_style);
+        let text_decoration_color = data.text_decoration_color.or(parent.text_decoration_color);
+        let text_shadows = data
+            .text_shadows
+            .as_ref()
+            .unwrap_or(&parent.text_shadows)
+            .clone();
         let font_size = data.font_size.unwrap_or(parent.font_size);
         let font_slant = data.font_slant.unwrap_or(parent.font_slant);
         let font_weight = data.font_weight.unwrap_or(parent.font_weight);
@@ -189,6 +193,9 @@ impl TextStyleState {
         font_families.extend_from_slice(&parent.font_families);
         let mut font_features = parent.font_features.clone();
         font_features.extend_from_slice(&data.font_features);
+
+        // Text overflow is not inheritable.
+        let text_overflow = data.text_overflow.clone().unwrap_or_default();
 
         Self {
             color,
@@ -240,7 +247,7 @@ pub struct TextStyleData {
     pub text_align: Option<TextAlign>,
     pub text_height: Option<TextHeightBehavior>,
     pub text_overflow: Option<TextOverflow>,
-    pub text_shadows: Vec<TextShadow>,
+    pub text_shadows: Option<Vec<TextShadow>>,
     pub text_decoration: Option<TextDecoration>,
     pub text_decoration_style: Option<TextDecorationStyle>,
     pub text_decoration_color: Option<Color>,
@@ -342,6 +349,8 @@ pub struct EffectState {
 
     pub opacities: Rc<[f32]>,
 
+    pub masks: Rc<[NodeId]>,
+
     pub blur: Option<f32>,
 
     pub scrollables: Rc<[NodeId]>,
@@ -410,6 +419,12 @@ impl EffectState {
                 if self.opacities.as_ref() != opacities {
                     self.opacities = Rc::from(opacities);
                 }
+            }
+
+            if effect_data.mask.is_some() {
+                let mut masks = parent_effect_state.masks.to_vec();
+                masks.push(node_id);
+                self.masks = Rc::from(masks);
             }
 
             if effect_data.scrollable {
@@ -519,11 +534,8 @@ impl AccessibilityState {
             group.retain(|id| *id != self.a11y_id);
         }
 
-        let a11y_id = data.a11y_id.unwrap_or(self.a11y_intrinsic_id);
-        if self.a11y_id != a11y_id {
-            accessibility_diff.add_or_update(node_id);
-            self.a11y_id = a11y_id;
-        }
+        self.a11y_id = data.a11y_id.unwrap_or(self.a11y_intrinsic_id);
+        accessibility_diff.add_or_update(node_id);
 
         if let Some(member_of) = data.builder.member_of() {
             let group = accessibility_groups.entry(member_of).or_default();

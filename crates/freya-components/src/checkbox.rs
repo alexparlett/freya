@@ -63,7 +63,7 @@ pub struct Checkbox {
 }
 
 impl KeyExt for Checkbox {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -102,9 +102,9 @@ impl Checkbox {
 
 impl Component for Checkbox {
     fn render(&self) -> impl IntoElement {
+        let mut hovering = use_state(|| false);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
-        let mut hovered = use_state(|| false);
         let CheckboxTheme {
             unselected_fill,
             unselected_border_fill,
@@ -142,7 +142,7 @@ impl Component for Checkbox {
         } else {
             (unselected_fill, unselected_border_fill)
         };
-        let fill = if hovered() {
+        let fill = if hovering() {
             hover_border_fill
         } else {
             state_border
@@ -172,8 +172,8 @@ impl Component for Checkbox {
             .border(border)
             .border(focused_border)
             .background(background)
-            .on_pointer_enter(move |_| hovered.set(true))
-            .on_pointer_leave(move |_| hovered.set(false))
+            .on_pointer_enter(move |_| hovering.set_if_modified(true))
+            .on_pointer_leave(move |_| hovering.set_if_modified(false))
             .on_key_down({
                 move |e: Event<KeyboardEventData>| {
                     if !e.is_press_event() {

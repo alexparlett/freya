@@ -20,13 +20,14 @@ f-nix:
     alejandra flake.nix
 
 web-demo:
-    cd examples/web && cargo build --profile web-release --target wasm32-unknown-emscripten
+    cd examples/web && cargo build --profile web-release --target wasm32-unknown-emscripten --features freya/web
     mkdir -p website/public/demo
     cp "${CARGO_TARGET_DIR:-target}"/wasm32-unknown-emscripten/web-release/web_example.js website/public/demo/
     cp "${CARGO_TARGET_DIR:-target}"/wasm32-unknown-emscripten/web-release/web_example.wasm website/public/demo/
 
 sa:
     cargo audit
+    cargo deny check
 
 c:
     taplo check
@@ -45,11 +46,14 @@ t:
     cargo test --doc --workspace --exclude web --exclude freya-web
     cargo nextest run --workspace --exclude examples --exclude web --exclude freya-web --features all-tests
 
+t-winit:
+    cargo test --package freya-winit --test smoke --features smoke-test --locked
+
 t-layout:
     cargo nextest run --package torin
 
 d:
-    RUSTDOCFLAGS="--cfg docsrs" {{nightly_cargo}} doc --no-deps --workspace --features "all, docs" --open
+    RUSTC="${FREYA_NIGHTLY_RUSTC:-$(rustup which --toolchain {{nightly_toolchain}} rustc)}" RUSTDOC="${FREYA_NIGHTLY_RUSTDOC:-$(rustup which --toolchain {{nightly_toolchain}} rustdoc)}" RUSTDOCFLAGS="--cfg docsrs" env -u NIX_LDFLAGS -u NIX_LDFLAGS_FOR_BUILD {{nightly_cargo}} doc --no-deps --workspace --features "all, docs" --open
 
 tc:
     cargo nextest run --workspace --exclude examples --exclude web --exclude freya-web --features all-tests
@@ -60,17 +64,18 @@ t-components:
 t-core:
    cargo nextest run --package freya-core --package ragnarok
 
-pe:
-    cargo bench --package freya-core --bench dev_perf
+callgrind_runner := "valgrind -q --tool=callgrind --instr-atstart=no"
+
+pe: ps
 
 hr:
     dx serve --hot-patch --example animation_router --verbose --features "hotreload"
 
 ps:
-    cargo bench --package freya-core --bench dev_perf --features "hotpath"
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="{{callgrind_runner}}" cargo bench --package freya-core --bench dev_perf --features "hotpath-callgrind"
 
 pa:
-    cargo bench --package freya-core --bench dev_perf --features "hotpath, hotpath-alloc"
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="{{callgrind_runner}}" cargo bench --package freya-core --bench dev_perf --features "hotpath-callgrind, hotpath-alloc"
 
 ps-ci:
     cargo bench --package freya-core --bench dev_perf --features "hotpath"
@@ -79,10 +84,21 @@ pa-ci:
     cargo bench --package freya-core --bench dev_perf --features "hotpath, hotpath-alloc"
 
 pc:
-    cargo bench --package freya-core --bench core_perf --features "hotpath, hotpath-alloc"
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="{{callgrind_runner}}" cargo bench --package freya-core --bench core_perf --features "hotpath-callgrind, hotpath-alloc"
 
 pc-ci:
     cargo bench --package freya-core --bench core_perf --features "hotpath, hotpath-alloc"
+
+pp workload="painting_suite":
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="{{callgrind_runner}}" cargo test --package freya-core --test paint_performance --release --features "hotpath-callgrind" "{{workload}}" -- --ignored --exact --nocapture --test-threads=1
+
+pt:
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="{{callgrind_runner}}" cargo bench --package torin --bench callgrind --features "hotpath-callgrind, hotpath-alloc"
+
+# One torin Criterion benchmark run HOTPATH_CRITERION_ITERATIONS times, e.g.
+# `HOTPATH_CRITERION_ITERATIONS=100 just ptc "benchmarks/size=4095 depth=12 wide=2 mode=not cached"`
+ptc benchmark:
+    CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="{{callgrind_runner}}" cargo bench --package torin --bench bench --features "hotpath-callgrind, hotpath-alloc" -- --test --exact "{{benchmark}}"
 
 ba:
     cargo build --all-targets --workspace -F freya/all-debug

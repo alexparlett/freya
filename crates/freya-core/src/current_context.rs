@@ -34,8 +34,7 @@ impl CurrentContext {
             let scope_storage = scope_storages.get(&new_context.scope_id).unwrap();
             scope_storage.reactive_context.clone()
         };
-        let _entered = Entered::new(new_context);
-        ReactiveContext::run(reactive_context, run)
+        Self::run(new_context, || ReactiveContext::run(reactive_context, run))
     }
 
     pub fn run<T>(new_context: Self, run: impl FnOnce() -> T) -> T {
@@ -52,7 +51,7 @@ impl CurrentContext {
     }
 
     pub fn with<T>(with: impl FnOnce(&CurrentContext) -> T) -> T {
-        CURRENT_CONTEXT.with(|context| with(context.borrow().as_ref().expect("Your trying to access Freya's current context outside of it, you might be in a separate thread or async task that is not integrated with Freya.")))
+        CURRENT_CONTEXT.with(|context| with(context.borrow().as_ref().expect("You're trying to access Freya's current context outside of it, you might be in a separate thread or async task that is not integrated with Freya.")))
     }
 
     pub fn try_with<T>(with: impl FnOnce(&CurrentContext) -> T) -> Option<T> {
@@ -71,10 +70,9 @@ impl CurrentContext {
     }
 }
 
-/// Makes a context current until dropped, which happens even when the code under it unwinds,
-/// so a host that catches the panic does not run later code under it.
 /// Makes a context current until dropped, then restores the one before it, so a runner can
-/// run inside another's render.
+/// run inside another's render. Dropping happens even when the code under it unwinds, so a
+/// host that catches the panic does not run later code under it.
 struct Entered(Option<CurrentContext>);
 
 impl Entered {

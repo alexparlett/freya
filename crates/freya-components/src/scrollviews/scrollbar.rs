@@ -15,9 +15,7 @@ use torin::{
         Alignment,
         Direction,
         Gaps,
-        Point2D,
         Position,
-        Size2D,
     },
     size::Size,
 };
@@ -27,6 +25,8 @@ use crate::{
     get_theme,
     scrollviews::{
         ScrollController,
+        ScrollPoint,
+        ScrollSize,
         ScrollThumb,
         shared::{
             Axis,
@@ -56,11 +56,13 @@ define_theme! {
 #[derive(Clone, PartialEq)]
 pub struct ScrollBarContext {
     pub axis: Axis,
-    pub scroll_position: Point2D,
-    pub viewport_size: Size2D,
-    pub content_size: Size2D,
+    pub scroll_position: ScrollPoint,
+    pub viewport_size: ScrollSize,
+    pub content_size: ScrollSize,
     pub scroll_controller: ScrollController,
     pub timeout: Timeout,
+    /// Whether idle scrollbars should hide when the timeout elapses.
+    pub auto_hide_scrollbars: bool,
     pub clicking_scrollbar: State<Option<(Axis, f64)>>,
     pub thumb_events: ScrollBarThumbEvents,
     pub thumb_offset: f32,
@@ -132,7 +134,7 @@ impl ScrollBar {
 }
 
 impl KeyExt for ScrollBar {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -144,6 +146,7 @@ impl ComponentOwned for ScrollBar {
         let ScrollBarContext {
             axis,
             timeout,
+            auto_hide_scrollbars,
             clicking_scrollbar,
             thumb_events,
             thumb_offset,
@@ -152,8 +155,8 @@ impl ComponentOwned for ScrollBar {
             ..
         } = context;
         let mut hovering = use_state(|| false);
-        let is_hidden = timeout.elapsed() && clicking_scrollbar.read().is_none();
         let is_expanded = clicking_scrollbar.read().is_some() || *hovering.read();
+        let is_hidden = auto_hide_scrollbars && timeout.elapsed() && !is_expanded;
 
         let animation = use_animation_with_dependencies(&is_expanded, move |conf, is_expanded| {
             conf.on_creation(OnCreation::Finish);
@@ -248,7 +251,7 @@ impl ComponentOwned for ScrollBar {
             .on_pointer_down(|e: Event<PointerEventData>| {
                 e.stop_propagation();
             })
-            .child(
+            .maybe_child((!is_hidden).then(|| {
                 rect()
                     .width(Size::fill())
                     .height(Size::fill())
@@ -266,13 +269,7 @@ impl ComponentOwned for ScrollBar {
                             .height(bar_height)
                             .margin(bar_margin)
                             .background(scrollbar_theme.background.with_a(opacity as u8))
-                            .corner_radius(8.)
-                            .shadow(Shadow::new().blur(6.).color((
-                                0,
-                                0,
-                                0,
-                                (opacity * 0.28) as u8,
-                            ))),
+                            .corner_radius(8.),
                     )
                     .child(
                         rect()
@@ -290,8 +287,8 @@ impl ComponentOwned for ScrollBar {
                                 cross_size,
                                 cross_gap,
                             }),
-                    ),
-            )
+                    )
+            }))
     }
 
     fn render_key(&self) -> DiffKey {

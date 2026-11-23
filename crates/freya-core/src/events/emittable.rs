@@ -9,6 +9,7 @@ use crate::{
         data::{
             EventType,
             KeyboardEventData,
+            MouseButton,
             MouseEventData,
             PointerEventData,
             TouchEventData,
@@ -20,7 +21,7 @@ use crate::{
     integration::PlatformEvent,
     node_id::NodeId,
     prelude::{
-        FileEventData,
+        DragEventData,
         ImePreeditEventData,
     },
 };
@@ -76,6 +77,18 @@ impl EmmitableEvent {
         let bubbles = name.does_bubble();
 
         match platform_event {
+            PlatformEvent::PointerCancel { cursor } => Self::new(
+                node_id,
+                name,
+                PlatformEvent::Mouse {
+                    name: MouseEventName::MouseUp,
+                    cursor,
+                    button: Some(MouseButton::Left),
+                    modifiers: keyboard_types::Modifiers::empty(),
+                },
+                node_area,
+                scale_factor,
+            ),
             PlatformEvent::PointerExit { cursor } => Self::new(
                 node_id,
                 name,
@@ -93,7 +106,7 @@ impl EmmitableEvent {
                 cursor,
                 button,
                 modifiers,
-            } if name.is_enter()
+            } if name.is_pointer_enter()
                 || name.is_left()
                 || name.is_press()
                 || name.is_down()
@@ -128,7 +141,7 @@ impl EmmitableEvent {
                 phase,
                 force,
                 ..
-            } if name.is_enter()
+            } if name.is_pointer_enter()
                 || name.is_left()
                 || name.is_press()
                 || name.is_down()
@@ -203,6 +216,7 @@ impl EmmitableEvent {
                 scroll,
                 source,
                 timestamp,
+                phase,
                 cursor,
                 ..
             } => {
@@ -222,6 +236,7 @@ impl EmmitableEvent {
                         scroll.y,
                         source,
                         timestamp,
+                        phase,
                         global_location,
                         element_location,
                     )),
@@ -270,18 +285,35 @@ impl EmmitableEvent {
                 data: EventType::ImePreedit(ImePreeditEventData::new(text, cursor)),
                 bubbles,
             },
-            PlatformEvent::File {
+            PlatformEvent::Drag {
                 name: platform_event_name,
                 cursor,
-                file_paths,
-            } => Self {
-                node_id,
-                name,
-
-                source_event: platform_event_name.into(),
-                data: EventType::File(FileEventData::new(cursor, file_paths)),
-                bubbles,
-            },
+                data,
+                decision,
+                ..
+            } => {
+                let global_location = cursor / scale_factor;
+                let element_location = node_area.map_or(global_location, |area| {
+                    (cursor - area.origin.to_f64()).to_point() / scale_factor
+                });
+                Self {
+                    node_id,
+                    name,
+                    source_event: platform_event_name.into(),
+                    data: EventType::Drag(DragEventData {
+                        data,
+                        global_location,
+                        element_location,
+                        target: node_id,
+                        decision: if name == EventName::DragOver {
+                            decision
+                        } else {
+                            None
+                        },
+                    }),
+                    bubbles,
+                }
+            }
         }
     }
 }
