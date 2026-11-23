@@ -130,13 +130,13 @@ impl Default for Button {
 }
 
 impl ChildrenExt for Button {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.elements
     }
 }
 
 impl KeyExt for Button {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -271,6 +271,7 @@ impl CornerRadiusExt for Button {
 impl Component for Button {
     fn render(&self) -> impl IntoElement {
         let mut hovering = use_state(|| false);
+        let mut pressing = use_state(|| false);
         let a11y_id = use_a11y();
         let focus = use_focus(a11y_id);
 
@@ -338,6 +339,8 @@ impl Component for Button {
         };
         let background = if !self.enabled {
             theme_colors.disabled_background
+        } else if pressing() {
+            theme_colors.hover_background * 0.92
         } else if hovered {
             theme_colors.hover_background
         } else {
@@ -354,10 +357,12 @@ impl Component for Button {
         rect()
             .overflow(Overflow::Clip)
             .a11y_id(a11y_id)
+            .a11y_enabled(self.enabled)
             .a11y_focusable(self.enabled && self.focusable)
             .a11y_role(AccessibilityRole::Button)
             .background(background)
             .border(border)
+            .margin(theme_layout.margin)
             .padding(theme_layout.padding)
             .corner_radius(theme_layout.corner_radius)
             .width(theme_layout.width)
@@ -365,10 +370,21 @@ impl Component for Button {
             .color(color)
             .center()
             .maybe(self.enabled, |rect| {
-                rect.map(self.on_pointer_down.clone(), |rect, on_pointer_down| {
-                    rect.on_pointer_down(move |e: Event<PointerEventData>| {
-                        on_pointer_down.call(e);
-                    })
+                rect.on_pointer_down({
+                    let on_pointer_down = self.on_pointer_down.clone();
+                    move |e: Event<PointerEventData>| {
+                        if e.data().is_primary() {
+                            pressing.set_if_modified(true);
+                        }
+                        if let Some(on_pointer_down) = &on_pointer_down {
+                            on_pointer_down.call(e);
+                        }
+                    }
+                })
+                .on_key_down(move |e: Event<KeyboardEventData>| {
+                    if e.is_press_event() {
+                        pressing.set_if_modified(true);
+                    }
                 })
                 .map(self.on_secondary_down.clone(), |el, on_secondary_down| {
                     el.on_secondary_down(move |e: Event<PressEventData>| {
@@ -387,7 +403,9 @@ impl Component for Button {
                                     handler.call(e);
                                 }
                             }
-                            PressEventData::Touch(_) | PressEventData::Keyboard(_) => {
+                            PressEventData::Touch(_)
+                            | PressEventData::Keyboard(_)
+                            | PressEventData::Accessibility(_) => {
                                 if let Some(handler) = &on_press {
                                     handler.call(e);
                                 }
@@ -396,10 +414,21 @@ impl Component for Button {
                     }
                 })
                 .on_pointer_over(move |_| {
-                    hovering.set(true);
+                    hovering.set_if_modified(true);
                 })
-                .on_pointer_out(move |_| hovering.set_if_modified(false))
             })
+            .on_global_pointer_up(move |e: Event<PointerEventData>| {
+                if e.data().is_primary() {
+                    pressing.set_if_modified(false);
+                }
+            })
+            .on_global_key_up(move |e: Event<KeyboardEventData>| {
+                if e.is_press_event() {
+                    pressing.set_if_modified(false);
+                }
+            })
+            .on_pointer_leave(move |_| pressing.set_if_modified(false))
+            .on_pointer_out(move |_| hovering.set_if_modified(false))
             .cursor(if self.enabled {
                 self.cursor_icon
             } else {

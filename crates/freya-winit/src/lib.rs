@@ -4,25 +4,34 @@ pub mod reexports {
 
 use std::sync::Arc;
 
-use freya_core::integration::GlobalContexts;
+use freya_core::{
+    integration::GlobalContexts,
+    prelude::{
+        GlobalTasks,
+        Platform,
+    },
+};
 
 use crate::{
     config::LaunchConfig,
     drivers::GraphicsContext,
     renderer::{
-        LaunchProxy,
-        NativeEvent,
-        NativeGenericEvent,
+        LaunchHandle,
+        RendererAppMessage,
+        RendererMessage,
         WinitRenderer,
     },
 };
 mod accessibility;
 mod clipboard;
 pub mod config;
+mod data_transfer;
+mod drag_preview;
 mod drivers;
 pub mod extensions;
 pub mod integration;
 mod parent_window;
+mod platform_drag;
 pub mod plugins;
 pub mod renderer;
 #[cfg(target_os = "macos")]
@@ -38,7 +47,7 @@ use futures_util::task::{
     waker,
 };
 
-use crate::winit::event_loop::EventLoopProxy;
+use crate::renderer::RendererSender;
 
 pub mod winit {
     pub use winit::*;
@@ -100,12 +109,13 @@ fn launch_inner(mut launch_config: LaunchConfig) {
     use winit::event_loop::EventLoop;
 
     let event_loop = launch_config.event_loop.take().unwrap_or_else(|| {
-        EventLoop::<NativeEvent>::with_user_event()
+        EventLoop::builder()
             .build()
             .expect("Failed to create event loop.")
     });
 
-    let proxy = event_loop.create_proxy();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let proxy = RendererSender::new(event_loop.create_proxy(), sender);
 
     let mut font_collection = FontCollection::new();
     let def_mgr = FontMgr::default();
@@ -122,13 +132,13 @@ fn launch_inner(mut launch_config: LaunchConfig) {
     font_collection.set_dynamic_font_manager(font_mgr.clone());
     font_collection.paragraph_cache_mut().turn_on(false);
 
-    struct FuturesWaker(EventLoopProxy<NativeEvent>);
+    struct FuturesWaker(RendererSender);
 
     impl ArcWake for FuturesWaker {
         fn wake_by_ref(arc_self: &Arc<Self>) {
             _ = arc_self
                 .0
-                .send_event(NativeEvent::Generic(NativeGenericEvent::PollFutures));
+                .send_message(RendererMessage::App(RendererAppMessage::PollFutures));
         }
     }
 
@@ -137,36 +147,44 @@ fn launch_inner(mut launch_config: LaunchConfig) {
     #[cfg(feature = "hotreload")]
     freya_core::hotreload::connect_subsecond();
 
-    let global_contexts = GlobalContexts::default();
-    global_contexts.insert_context(crate::clipboard::create_clipboard());
+    let global_contexts = GlobalContexts::register();
+    global_contexts.insert_context(Platform::new({
+        let proxy = proxy.clone();
+        move |event| {
+            let _ = proxy.send_message(RendererMessage::App(RendererAppMessage::Command(event)));
+        }
+    }));
+    global_contexts.insert_context(crate::clipboard::create_clipboard(proxy.clone()));
     for insert_global in launch_config.globals {
         insert_global(&global_contexts);
     }
-    let mut renderer = WinitRenderer {
+
+    let global_tasks = global_contexts.insert_context(GlobalTasks::new(waker));
+    for task in launch_config.tasks {
+        global_tasks.spawn(task(LaunchHandle(proxy.clone())));
+    }
+
+    let renderer = WinitRenderer {
         windows: HashMap::default(),
         global_contexts,
         #[cfg(feature = "tray")]
         tray: launch_config.tray,
-        #[cfg(all(feature = "tray", not(target_os = "linux")))]
+        #[cfg(feature = "tray")]
         tray_icon: None,
         #[cfg(feature = "menu")]
         menu: launch_config.menu,
         #[cfg(feature = "menu")]
         app_menu: None,
         resumed: false,
-        futures: launch_config
-            .tasks
-            .into_iter()
-            .map(|task| task(LaunchProxy(proxy.clone())))
-            .collect::<Vec<_>>(),
         proxy,
+        messages: receiver,
+        clipboard_reads: HashMap::default(),
         font_provider: provider,
         font_manager: font_mgr,
         font_collection,
         windows_configs: launch_config.windows_configs,
         plugins: launch_config.plugins,
         fallback_fonts: launch_config.fallback_fonts,
-        waker,
         exit_on_close: launch_config.exit_on_close,
         gpu_resource_cache_limit: launch_config.gpu_resource_cache_limit,
         graphics_context: GraphicsContext::default(),
@@ -174,12 +192,11 @@ fn launch_inner(mut launch_config: LaunchConfig) {
 
     #[cfg(feature = "tray")]
     {
-        use crate::{
-            renderer::{
-                NativeTrayEvent,
-                NativeTrayEventAction,
-            },
-            tray::TrayIconEvent,
+        #[cfg(not(feature = "menu"))]
+        use crate::tray::menu::MenuEvent;
+        use crate::tray::{
+            TrayEvent,
+            TrayIconEvent,
         };
 
         // With the `menu` feature on, muda's single global handler is set below and the
@@ -187,49 +204,28 @@ fn launch_inner(mut launch_config: LaunchConfig) {
         #[cfg(not(feature = "menu"))]
         {
             let proxy = renderer.proxy.clone();
-            crate::tray::menu::MenuEvent::set_event_handler(Some(move |event| {
-                let _ = proxy.send_event(NativeEvent::Tray(NativeTrayEvent {
-                    action: NativeTrayEventAction::MenuEvent(event),
-                }));
+            MenuEvent::set_event_handler(Some(move |event| {
+                let _ = proxy.send_message(RendererMessage::Tray(TrayEvent::Menu(event)));
             }));
         }
         let proxy = renderer.proxy.clone();
         TrayIconEvent::set_event_handler(Some(move |event| {
-            let _ = proxy.send_event(NativeEvent::Tray(NativeTrayEvent {
-                action: NativeTrayEventAction::TrayEvent(event),
-            }));
+            let _ = proxy.send_message(RendererMessage::Tray(TrayEvent::Icon(event)));
         }));
-
-        #[cfg(target_os = "linux")]
-        if let Some(tray_icon) = renderer.tray.0.take() {
-            std::thread::spawn(move || {
-                if !gtk::is_initialized() {
-                    if gtk::init().is_ok() {
-                        tracing::debug!("Tray: GTK initialized");
-                    } else {
-                        tracing::error!("Tray: Failed to initialize GTK");
-                    }
-                }
-
-                let _tray_icon = (tray_icon)();
-
-                gtk::main();
-            });
-        }
     }
 
     // Muda's single global menu handler: forward every menu event through the loop; the
-    // renderer fans it out to the menubar handler and (when enabled) the tray handler.
+    // renderer fans it out to the menubar handler and, when enabled, the tray handler.
     #[cfg(feature = "menu")]
     {
         let proxy = renderer.proxy.clone();
         muda::MenuEvent::set_event_handler(Some(move |event| {
-            let _ = proxy.send_event(NativeEvent::Menu(event));
+            let _ = proxy.send_message(RendererMessage::Menu(event));
         }));
     }
 
     // The loop ends in an error when the display goes away, as at the end of a session.
-    if let Err(err) = event_loop.run_app(&mut renderer) {
+    if let Err(err) = event_loop.run_app(renderer) {
         tracing::warn!("event loop ended: {err}");
     }
 }

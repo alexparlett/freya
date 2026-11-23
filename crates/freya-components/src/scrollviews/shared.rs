@@ -9,18 +9,15 @@ use std::{
 
 use freya_core::prelude::*;
 use torin::{
-    geometry::{
-        Point2D,
-        Size2D,
-    },
-    prelude::{
-        Area,
-        Direction,
-    },
+    prelude::Direction,
     size::Size,
 };
 
-use crate::scrollviews::ScrollController;
+use crate::scrollviews::{
+    ScrollController,
+    ScrollPoint,
+    ScrollSize,
+};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Axis {
@@ -43,14 +40,14 @@ const WHEEL_ACCELERATION_FAST: Duration = Duration::from_millis(15);
 
 /// The most a wheel delta is multiplied by. What a ceiling buys is the reader's place in the
 /// list, so there is a second, tighter bound in [`accelerate_wheel_delta`]: a viewport per event.
-const WHEEL_ACCELERATION_MAX: f32 = 10.0;
+const WHEEL_ACCELERATION_MAX: f64 = 10.0;
 
 /// How much to scale a wheel delta given the gap since the previous event of the same gesture.
 /// Squared so the ramp starts gently, keeping an ordinary browsing pace near the plain rate.
-fn wheel_acceleration(gap: Duration) -> f32 {
-    let slow = WHEEL_ACCELERATION_SLOW.as_secs_f32();
-    let fast = WHEEL_ACCELERATION_FAST.as_secs_f32();
-    let speed = ((slow - gap.as_secs_f32()) / (slow - fast)).clamp(0., 1.);
+fn wheel_acceleration(gap: Duration) -> f64 {
+    let slow = WHEEL_ACCELERATION_SLOW.as_secs_f64();
+    let fast = WHEEL_ACCELERATION_FAST.as_secs_f64();
+    let speed = ((slow - gap.as_secs_f64()) / (slow - fast)).clamp(0., 1.);
     1. + (WHEEL_ACCELERATION_MAX - 1.) * speed * speed
 }
 
@@ -62,7 +59,7 @@ pub(crate) struct WheelGesture {
     pub start: Instant,
     /// What to multiply this event's line delta by, from how fast the gesture is arriving. One
     /// reading per event, shared by every view the event propagates through.
-    pub acceleration: f32,
+    pub acceleration: f64,
 }
 
 /// The clock's state between events: the gesture's identity, the last event that advanced it,
@@ -72,7 +69,7 @@ struct WheelGestureState {
     start: Instant,
     last: Instant,
     source: WheelSource,
-    acceleration: f32,
+    acceleration: f64,
 }
 
 /// The window's shared wheel-gesture clock, lazily stored as a root context. Shared across every
@@ -167,12 +164,12 @@ impl WheelGestureClock {
 /// An unmeasured viewport has no screenful to cap against, so it caps against nothing rather than
 /// against zero.
 pub(crate) fn accelerate_wheel_delta(
-    delta: f32,
+    delta: f64,
     source: WheelSource,
-    acceleration: f32,
-    viewport_size: f32,
-) -> f32 {
-    if source != WheelSource::Line || delta.abs() < WheelSource::LINE_SIZE as f32 {
+    acceleration: f64,
+    viewport_size: f64,
+) -> f64 {
+    if source != WheelSource::Line || delta.abs() < WheelSource::LINE_SIZE {
         return delta;
     }
 
@@ -189,24 +186,27 @@ pub(crate) fn accelerate_wheel_delta(
 #[derive(Clone, Copy, PartialEq, Default)]
 pub(crate) struct WheelBehavior {
     pub invert: bool,
-    pub axis_lock: Option<f32>,
+    pub axis_lock: Option<f64>,
     pub contain: bool,
     pub latch: bool,
 }
 
 /// What a scroll view knows about itself when a wheel event reaches it.
 pub(crate) struct WheelTarget {
-    pub content: Size2D,
-    pub viewport: Area,
+    pub content: ScrollSize,
+    pub viewport: ScrollSize,
     /// The position being scrolled towards, corrected against the content.
-    pub scrolled: Point2D,
+    pub scrolled: ScrollPoint,
     /// The position on screen, which trails `scrolled` while an animation runs.
-    pub rendered: Point2D,
+    pub rendered: ScrollPoint,
+    /// Whether the view mirrors a [`ScrollController`] laid out by another view, so the
+    /// controller's own bounds and position are the ones to scroll against.
+    pub follows_scroll_controller: bool,
 }
 
 /// Handles one wheel event for a scroll view: inversion, axis lock, acceleration, gesture
-/// latching, the scroll itself and containment, in that order. The one wheel pipeline both
-/// [`ScrollView`](crate::scrollviews::ScrollView) and
+/// latching, touchpad gesture phases, the scroll itself and containment, in that order. The one
+/// wheel pipeline both [`ScrollView`](crate::scrollviews::ScrollView) and
 /// [`VirtualScrollView`](crate::scrollviews::VirtualScrollView) run, so the two cannot drift.
 ///
 /// Only device events are shaped. A synthesized event, such as accessibility focus revealing a
@@ -214,7 +214,6 @@ pub(crate) struct WheelTarget {
 /// hidden, and letting it join or open a gesture could have a latching view drop it.
 ///
 /// Returns whether the event was handled here, so the caller knows to reset its scrollbar timeout.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_wheel(
     e: &Event<WheelEventData>,
     behavior: WheelBehavior,
@@ -229,14 +228,13 @@ pub(crate) fn handle_wheel(
 
     let invert = device && (pressing_shift != behavior.invert);
     let (mut x_movement, mut y_movement) = if invert {
-        (e.delta_y as f32, e.delta_x as f32)
+        (e.delta_y, e.delta_x)
     } else {
-        (e.delta_x as f32, e.delta_y as f32)
+        (e.delta_x, e.delta_y)
     };
 
-    // Axis lock: keep a dominant-axis gesture from drifting the cross axis (e.g. a mostly
-    // vertical trackpad scroll nudging a horizontal outer view sideways). When one axis's delta
-    // exceeds the other by `threshold`×, zero the minor axis.
+    // Axis lock: keep a dominant-axis gesture from drifting the cross axis. When one axis's delta
+    // exceeds the other by `threshold` times, the minor axis is dropped.
     if let (Some(threshold), true) = (behavior.axis_lock, device) {
         let (ax, ay) = (x_movement.abs(), y_movement.abs());
         if ay > ax * threshold {
@@ -246,29 +244,29 @@ pub(crate) fn handle_wheel(
         }
     }
 
+    let (content, viewport) = if target.follows_scroll_controller {
+        scroll_controller
+            .bounds
+            .peek()
+            .unwrap_or((target.content, target.viewport))
+    } else {
+        (target.content, target.viewport)
+    };
+
     // Acceleration, so a long list can be crossed with the wheel. Applied before the latch
     // decision so the delta the decision is taken on is the delta that will move.
     if let Some(gesture) = gesture {
-        x_movement = accelerate_wheel_delta(
-            x_movement,
-            e.source,
-            gesture.acceleration,
-            target.viewport.width(),
-        );
-        y_movement = accelerate_wheel_delta(
-            y_movement,
-            e.source,
-            gesture.acceleration,
-            target.viewport.height(),
-        );
+        x_movement =
+            accelerate_wheel_delta(x_movement, e.source, gesture.acceleration, viewport.width);
+        y_movement =
+            accelerate_wheel_delta(y_movement, e.source, gesture.acceleration, viewport.height);
     }
 
-    // Gesture latching: a gesture belongs to a view that saw its FIRST event
-    // (`gesture.start == e.timestamp`) and could move in its direction. Every view that saw that
-    // first event is a candidate, and the innermost one able to move takes it and stops
-    // propagation, so an outer latching view only gets the gesture when the inner declined it. A
-    // view the gesture only reaches mid-flight is never a candidate and passes the whole gesture
-    // through untouched. A latched gesture is consumed below even once it pins at an end.
+    // Gesture latching: a gesture belongs to a view that saw its first event
+    // (`gesture.start == e.timestamp`) and could move in its direction. The innermost such view
+    // takes it and stops propagation, so an outer latching view only gets the gesture when the
+    // inner one declined it. A view the gesture only reaches mid-flight passes it through
+    // untouched. A latched gesture is consumed below even once it pins at an end.
     let latched = match (behavior.latch, gesture) {
         (true, Some(gesture)) => {
             let decision = *latch.peek();
@@ -278,16 +276,16 @@ pub(crate) fn handle_wheel(
                     let latched = gesture.start == e.timestamp
                         && (get_scroll_position_from_wheel(
                             y_movement,
-                            target.content.height,
-                            target.viewport.height(),
+                            content.height,
+                            viewport.height,
                             target.scrolled.y,
-                        ) != target.scrolled.y as i32
+                        ) != target.scrolled.y
                             || get_scroll_position_from_wheel(
                                 x_movement,
-                                target.content.width,
-                                target.viewport.width(),
+                                content.width,
+                                viewport.width,
                                 target.scrolled.x,
-                            ) != target.scrolled.x as i32);
+                            ) != target.scrolled.x);
                     latch.set(Some((gesture.start, latched)));
                     latched
                 }
@@ -300,46 +298,49 @@ pub(crate) fn handle_wheel(
         _ => false,
     };
 
-    let animate = e.source == WheelSource::Line;
-    if animate {
-        scroll_controller.animate_from(target.rendered);
-    } else {
+    // TODO(marc2332): Enable and test touchpad smooth scrolling in mac and windows
+    let scroll_gesture =
+        TargetPlatform::get() == TargetPlatform::Linux && e.source == WheelSource::Pixel;
+    if scroll_gesture
+        && scroll_controller.scroll_gesture_phase(e.phase, (x_movement, y_movement).into())
+    {
+        return true;
+    }
+
+    let animate = e.source == WheelSource::Line || scroll_gesture;
+    if !animate {
         scroll_controller.stop();
     }
-    let base = if animate {
-        target.scrolled
+    let position = if animate || target.follows_scroll_controller {
+        scroll_controller.position()
     } else {
         target.rendered
     };
 
-    let scroll_position_y = get_scroll_position_from_wheel(
-        y_movement,
-        target.content.height,
-        target.viewport.height(),
-        base.y,
-    );
-    if scroll_controller.scroll_to_y(scroll_position_y) {
-        e.stop_propagation();
+    let scroll_position_y =
+        get_scroll_position_from_wheel(y_movement, content.height, viewport.height, position.y);
+    let scroll_position_x =
+        get_scroll_position_from_wheel(x_movement, content.width, viewport.width, position.x);
+    if animate
+        && ((x_movement != 0. && scroll_position_x != position.x)
+            || (y_movement != 0. && scroll_position_y != position.y))
+    {
+        let position = scroll_controller.animated_position(scroll_controller.position());
+        scroll_controller.animate_from(position);
     }
+    let changed_y = y_movement != 0. && scroll_controller.scroll_to_y(scroll_position_y);
+    let changed_x = x_movement != 0. && scroll_controller.scroll_to_x(scroll_position_x);
 
-    let scroll_position_x = get_scroll_position_from_wheel(
-        x_movement,
-        target.content.width,
-        target.viewport.width(),
-        base.x,
-    );
-    if scroll_controller.scroll_to_x(scroll_position_x) {
-        e.stop_propagation();
-    }
-
-    // A latched gesture owns the event end-to-end, so swallow it even once the position pins at
-    // an end. Containment swallows it too, but only while the content actually overflows: a view
-    // with nothing to scroll must stay transparent to the wheel or it would dead-zone the
-    // ancestor under the cursor.
-    if latched
+    // A latched gesture owns the event end-to-end, so it is swallowed even once the position
+    // pins at an end. Containment swallows it too, but only while the content overflows: a view
+    // with nothing to scroll stays transparent to the wheel, or it would dead-zone the ancestor
+    // under the cursor.
+    if changed_x
+        || changed_y
+        || latched
         || (behavior.contain
-            && (is_scrollable(target.content.height, target.viewport.height())
-                || is_scrollable(target.content.width, target.viewport.width())))
+            && (is_scrollable(content.height, viewport.height)
+                || is_scrollable(content.width, viewport.width)))
     {
         e.stop_propagation();
     }
@@ -348,49 +349,36 @@ pub(crate) fn handle_wheel(
 
 #[doc(hidden)]
 pub fn get_scroll_position_from_wheel(
-    wheel_movement: f32,
-    inner_size: f32,
-    viewport_size: f32,
-    scroll_position: f32,
-) -> i32 {
+    wheel_movement: f64,
+    inner_size: f64,
+    viewport_size: f64,
+    scroll_position: f64,
+) -> f64 {
     if viewport_size >= inner_size {
-        return 0;
+        return 0.;
     }
 
-    let new_position = scroll_position + wheel_movement;
+    let new_position = scroll_position - wheel_movement;
 
-    if new_position >= 0.0 && wheel_movement > 0.0 {
-        return 0;
+    if new_position <= 0.0 && wheel_movement > 0.0 {
+        return 0.;
     }
 
-    if new_position <= -(inner_size - viewport_size) && wheel_movement < 0.0 {
-        return -(inner_size - viewport_size) as i32;
+    let max_position = inner_size - viewport_size;
+    if new_position >= max_position && wheel_movement < 0.0 {
+        return max_position;
     }
 
-    new_position as i32
+    new_position
 }
 
 #[doc(hidden)]
 pub fn get_corrected_scroll_position(
-    inner_size: f32,
-    viewport_size: f32,
-    scroll_position: f32,
-) -> f32 {
-    // Considering it was a vertical scroll view, the start would be on top and the end on bottom.
-    let overscrolled_start = scroll_position > 0.0;
-    let overscrolled_end = (-scroll_position + viewport_size) > inner_size;
-
-    if overscrolled_start {
-        0f32
-    } else if overscrolled_end {
-        if viewport_size < inner_size {
-            -(inner_size - viewport_size)
-        } else {
-            0f32
-        }
-    } else {
-        scroll_position
-    }
+    inner_size: f64,
+    viewport_size: f64,
+    scroll_position: f64,
+) -> f64 {
+    scroll_position.clamp(0., (inner_size - viewport_size).max(0.))
 }
 
 #[doc(hidden)]
@@ -403,28 +391,28 @@ pub fn get_container_sizes(size: Size) -> (Size, Size) {
 }
 
 /// Whether an axis can scroll: its content (`inner_size`) is larger than the viewport
-/// (`viewport_size`) showing it. A zero or unmeasured viewport counts as not-yet-scrollable.
+/// (`viewport_size`) showing it. A zero or unmeasured viewport counts as not yet scrollable.
 #[doc(hidden)]
-pub fn is_scrollable(inner_size: f32, viewport_size: f32) -> bool {
+pub fn is_scrollable(inner_size: f64, viewport_size: f64) -> bool {
     viewport_size > 0. && viewport_size < inner_size
 }
 
 #[doc(hidden)]
 pub fn is_scrollbar_visible(
     is_scrollbar_enabled: bool,
-    inner_size: f32,
-    viewport_size: f32,
+    inner_size: f64,
+    viewport_size: f64,
 ) -> bool {
     is_scrollbar_enabled && viewport_size > MIN_SCROLLBAR_SIZE && viewport_size < inner_size
 }
 
-const MIN_SCROLLBAR_SIZE: f32 = 50.0;
+const MIN_SCROLLBAR_SIZE: f64 = 50.0;
 
 pub const SCROLLBAR_MARGIN: f32 = 3.0;
 
 /// Thumb size, scrollable content range and thumb travel range inside the track.
-fn get_thumb_ranges(inner_size: f32, viewport_size: f32) -> (f32, f32, f32) {
-    let track_size = viewport_size - SCROLLBAR_MARGIN * 2.0;
+fn get_thumb_ranges(inner_size: f64, viewport_size: f64) -> (f64, f64, f64) {
+    let track_size = viewport_size - SCROLLBAR_MARGIN as f64 * 2.0;
     let viewable_ratio = viewport_size / inner_size;
     let minimum_thumb_size = if track_size > MIN_SCROLLBAR_SIZE {
         MIN_SCROLLBAR_SIZE
@@ -445,9 +433,9 @@ fn get_thumb_ranges(inner_size: f32, viewport_size: f32) -> (f32, f32, f32) {
 
 #[doc(hidden)]
 pub fn get_scrollbar_pos_and_size(
-    inner_size: f32,
-    viewport_size: f32,
-    scroll_position: f32,
+    inner_size: f64,
+    viewport_size: f64,
+    scroll_position: f64,
 ) -> (f32, f32) {
     if viewport_size <= MIN_SCROLLBAR_SIZE || viewport_size >= inner_size {
         return (0.0, 0.0);
@@ -456,85 +444,84 @@ pub fn get_scrollbar_pos_and_size(
     let (scrollbar_size, available_scroll_range, available_thumb_range) =
         get_thumb_ranges(inner_size, viewport_size);
 
-    let normalized_scroll = -scroll_position / available_scroll_range;
+    let normalized_scroll = scroll_position / available_scroll_range;
     let scrollbar_position = normalized_scroll * available_thumb_range;
 
-    (scrollbar_position, scrollbar_size)
+    (scrollbar_position as f32, scrollbar_size as f32)
 }
+
 #[doc(hidden)]
 pub fn get_scroll_position_from_cursor(
-    cursor_position: f32,
-    inner_size: f32,
-    viewport_size: f32,
-) -> i32 {
+    cursor_position: f64,
+    inner_size: f64,
+    viewport_size: f64,
+) -> f64 {
     if viewport_size <= MIN_SCROLLBAR_SIZE || viewport_size >= inner_size {
-        return 0;
+        return 0.;
     }
 
     let (_, available_scroll_range, available_thumb_range) =
         get_thumb_ranges(inner_size, viewport_size);
 
-    // Clamp cursor position
-    let cursor_clamped = (cursor_position - SCROLLBAR_MARGIN).clamp(0.0, available_thumb_range);
+    let cursor_clamped =
+        (cursor_position - SCROLLBAR_MARGIN as f64).clamp(0.0, available_thumb_range);
 
     let normalized_scroll = cursor_clamped / available_thumb_range;
-    let new_position = -(normalized_scroll * available_scroll_range);
-
-    new_position as i32
+    normalized_scroll * available_scroll_range
 }
 
 pub fn handle_key_event(
-    key: &Key,
-    (mut x, mut y): (f32, f32),
-    inner_height: f32,
-    inner_width: f32,
-    viewport_height: f32,
-    viewport_width: f32,
+    event: &KeyboardEventData,
+    a11y_id: AccessibilityId,
+    mut position: ScrollPoint,
+    content: ScrollSize,
+    viewport: ScrollSize,
     direction: Direction,
-) -> Option<(f32, f32)> {
-    let y_page_delta = viewport_height;
-    let y_line_delta = y_page_delta / 5.0;
-    let x_page_delta = viewport_width;
-    let x_line_delta = x_page_delta / 5.0;
+    scroll_with_arrows: bool,
+) -> Option<ScrollPoint> {
+    let key = match &event.key {
+        Key::Named(key) => *key,
+        Key::Character(text) if text == " " && a11y_id.is_focused() => match event.modifiers {
+            modifiers if modifiers.is_empty() => NamedKey::PageDown,
+            Modifiers::SHIFT => NamedKey::PageUp,
+            _ => return None,
+        },
+        _ => return None,
+    };
 
-    // TODO(tropix126): Handle spacebar and spacebar + shift as Home and End
-
-    match key {
-        Key::Named(NamedKey::ArrowUp) => {
-            y = get_corrected_scroll_position(inner_height, viewport_height, y + y_line_delta)
-        }
-        Key::Named(NamedKey::ArrowDown) => {
-            y = get_corrected_scroll_position(inner_height, viewport_height, y - y_line_delta)
-        }
-        Key::Named(NamedKey::PageUp) => {
-            y = get_corrected_scroll_position(inner_height, viewport_height, y + y_line_delta)
-        }
-        Key::Named(NamedKey::PageDown) => {
-            y = get_corrected_scroll_position(inner_height, viewport_height, y - y_line_delta)
-        }
-        Key::Named(NamedKey::ArrowLeft) => {
-            x = get_corrected_scroll_position(inner_width, viewport_width, x + x_line_delta)
-        }
-        Key::Named(NamedKey::ArrowRight) => {
-            x = get_corrected_scroll_position(inner_width, viewport_width, x - x_line_delta)
-        }
-        Key::Named(NamedKey::Home) => {
-            if direction == Direction::Vertical {
-                y = 0.0;
-            } else {
-                x = 0.0;
-            }
-        }
-        Key::Named(NamedKey::End) => {
-            if direction == Direction::Vertical {
-                y = -inner_height;
-            } else {
-                x = -inner_width;
+    let axis = match key {
+        NamedKey::ArrowLeft | NamedKey::ArrowRight if scroll_with_arrows => Axis::X,
+        NamedKey::ArrowUp | NamedKey::ArrowDown if scroll_with_arrows => Axis::Y,
+        NamedKey::PageUp | NamedKey::PageDown | NamedKey::Home | NamedKey::End => {
+            match (
+                content.width > viewport.width,
+                content.height > viewport.height,
+            ) {
+                (true, false) => Axis::X,
+                (false, true) => Axis::Y,
+                _ if direction == Direction::Horizontal => Axis::X,
+                _ => Axis::Y,
             }
         }
         _ => return None,
     };
-    Some((x, y))
+
+    let (offset, content_size, viewport_size) = match axis {
+        Axis::X => (&mut position.x, content.width, viewport.width),
+        Axis::Y => (&mut position.y, content.height, viewport.height),
+    };
+    let line = viewport_size / 5.0;
+    let target = match key {
+        NamedKey::ArrowUp | NamedKey::ArrowLeft => *offset - line,
+        NamedKey::ArrowDown | NamedKey::ArrowRight => *offset + line,
+        NamedKey::PageUp => *offset - viewport_size,
+        NamedKey::PageDown => *offset + viewport_size,
+        NamedKey::Home => 0.,
+        NamedKey::End => content_size - viewport_size,
+        _ => return None,
+    };
+    *offset = get_corrected_scroll_position(content_size, viewport_size, target);
+    Some(position)
 }
 
 #[cfg(test)]
@@ -560,9 +547,9 @@ mod tests {
         wheel_acceleration,
     };
 
-    const NOTCH: f32 = WheelSource::LINE_SIZE as f32;
+    const NOTCH: f64 = WheelSource::LINE_SIZE;
     /// Large enough that the viewport cap is not what any curve assertion is measuring.
-    const TALL_VIEWPORT: f32 = 10_000.;
+    const TALL_VIEWPORT: f64 = 10_000.;
 
     #[test]
     fn wheel_acceleration_ramps_between_a_slow_and_a_fast_gesture() {
@@ -709,16 +696,16 @@ mod tests {
     #[test]
     fn scrollbar_can_drag_when_the_track_is_smaller_than_the_minimum_thumb() {
         for viewport_size in 51..=56 {
-            let viewport_size = viewport_size as f32;
+            let viewport_size = viewport_size as f64;
             let inner_size = viewport_size * 2.;
-            let track_size = viewport_size - SCROLLBAR_MARGIN * 2.;
+            let track_size = viewport_size - SCROLLBAR_MARGIN as f64 * 2.;
 
             let (_, thumb_size) = get_scrollbar_pos_and_size(inner_size, viewport_size, 0.);
 
-            assert!(thumb_size < track_size);
+            assert!((thumb_size as f64) < track_size);
             assert_eq!(
                 get_scroll_position_from_cursor(viewport_size, inner_size, viewport_size),
-                -viewport_size as i32
+                viewport_size
             );
         }
     }

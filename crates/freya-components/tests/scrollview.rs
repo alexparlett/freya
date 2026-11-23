@@ -7,6 +7,298 @@ use freya::prelude::*;
 use freya_testing::prelude::*;
 
 #[test]
+fn scroll_drag_only_cancels_press_when_content_overflows() {
+    for (virtualized, length) in [(false, 1usize), (false, 20), (true, 1), (true, 20)] {
+        let (mut test, (presses, controller)) = TestingRunner::new(
+            move || {
+                let mut presses = use_consume::<State<usize>>();
+                let controller = use_consume::<ScrollController>();
+                let button = move |index| {
+                    Button::new()
+                        .key(index)
+                        .height(Size::px(150.))
+                        .on_press(move |_| *presses.write() += 1)
+                        .child(format!("Button {index}"))
+                        .into_element()
+                };
+
+                if virtualized {
+                    VirtualScrollView::new_controlled(move |item, _| button(item.index), controller)
+                        .length(length)
+                        .item_size(150.)
+                        .into_element()
+                } else {
+                    ScrollView::new_controlled(controller)
+                        .children((0..length).map(button))
+                        .into_element()
+                }
+            },
+            (500., 500.).into(),
+            |runner| {
+                let presses = runner.provide_root_context(|| State::create(0usize));
+                let controller = runner.provide_root_context(|| ScrollController::new(0., 0.));
+                (presses, controller)
+            },
+            1.,
+        );
+        test.sync_and_update();
+
+        test.press_touch((40., 80.));
+        test.move_touch((40., 50.));
+        assert_eq!(test.run_in(|| controller.position().y) > 0., length > 1);
+        test.release_touch((40., 50.));
+        assert_eq!(*presses.peek(), usize::from(length == 1));
+    }
+}
+
+#[test]
+fn nested_scroll_drag_ownership() {
+    for virtualized in [false, true] {
+        for (direction, content, start, movement, inner_scrolls) in [
+            (
+                Direction::Horizontal,
+                (200., 100.),
+                (0, 0),
+                (1., -10.),
+                false,
+            ),
+            (
+                Direction::Horizontal,
+                (1500., 100.),
+                (0, 0),
+                (1., -10.),
+                false,
+            ),
+            (
+                Direction::Horizontal,
+                (1500., 100.),
+                (0, 0),
+                (-10., -1.),
+                true,
+            ),
+            (Direction::Vertical, (200., 1000.), (0, 0), (0., -10.), true),
+            (
+                Direction::Vertical,
+                (200., 1000.),
+                (200, 0),
+                (0., 10.),
+                false,
+            ),
+            (
+                Direction::Vertical,
+                (200., 1000.),
+                (200, 900),
+                (0., -10.),
+                false,
+            ),
+            (
+                Direction::Vertical,
+                (200., 1000.),
+                (200, 900),
+                (0., 10.),
+                true,
+            ),
+        ] {
+            let (page_start, inner_start) = start;
+            let (mut test, (mut page, mut inner)) = TestingRunner::new(
+                move || {
+                    let (page, inner) = use_consume::<(ScrollController, ScrollController)>();
+                    let row = move |index| {
+                        if index == 3 {
+                            ScrollView::new_controlled(inner)
+                                .key(index)
+                                .direction(direction)
+                                .width(Size::fill())
+                                .height(Size::px(100.))
+                                .child(
+                                    rect()
+                                        .width(Size::px(content.0))
+                                        .height(Size::px(content.1)),
+                                )
+                                .into_element()
+                        } else {
+                            rect()
+                                .key(index)
+                                .width(Size::fill())
+                                .height(Size::px(100.))
+                                .into_element()
+                        }
+                    };
+                    if virtualized {
+                        VirtualScrollView::new_controlled(move |item, _| row(item.index), page)
+                            .length(10usize)
+                            .item_size(100.)
+                            .into_element()
+                    } else {
+                        ScrollView::new_controlled(page)
+                            .children((0..10).map(row))
+                            .into_element()
+                    }
+                },
+                (500., 500.).into(),
+                |runner| {
+                    runner.provide_root_context(|| {
+                        (
+                            ScrollController::new(0., page_start as f64),
+                            ScrollController::new(0., inner_start as f64),
+                        )
+                    })
+                },
+                1.,
+            );
+            test.sync_and_update();
+            test.sync_and_update();
+            let position = |test: &TestingRunner, controller: ScrollController| {
+                test.run_in(|| {
+                    let position = controller.position();
+                    (position.x as i32, position.y as i32)
+                })
+            };
+
+            assert_eq!(position(&test, page), (0, page_start));
+            assert_eq!(position(&test, inner), (0, inner_start));
+
+            let press = (400., 350. - page_start as f64);
+            test.press_touch(press);
+            for step in 1..=3 {
+                test.move_touch((
+                    press.0 + movement.0 * step as f64,
+                    press.1 + movement.1 * step as f64,
+                ));
+                let expected_inner = if !inner_scrolls {
+                    (0, inner_start)
+                } else if direction == Direction::Horizontal {
+                    (-movement.0 as i32 * step, inner_start)
+                } else {
+                    (0, inner_start - movement.1 as i32 * step)
+                };
+                assert_eq!(position(&test, inner), expected_inner);
+                assert_eq!(
+                    position(&test, page),
+                    (
+                        0,
+                        page_start
+                            - if inner_scrolls {
+                                0
+                            } else {
+                                movement.1 as i32 * step
+                            }
+                    )
+                );
+            }
+            test.release_touch((press.0 + movement.0 * 3., press.1 + movement.1 * 3.));
+
+            test.run_in(|| {
+                page.stop();
+                inner.stop();
+            });
+            test.sync_and_update();
+
+            // Start a new drag outside the inner view.
+            let inner_before = position(&test, inner);
+            let page_before = position(&test, page);
+            test.press_touch((400., 450.));
+            test.move_touch((370., 450.));
+            assert_eq!(position(&test, inner), inner_before);
+            assert_eq!(position(&test, page).0, page_before.0);
+            test.move_touch((370., 420.));
+            assert_eq!(position(&test, inner), inner_before);
+            assert_eq!(position(&test, page).1, page_before.1 + 30);
+            test.release_touch((370., 420.));
+        }
+    }
+}
+
+#[test]
+fn scroll_view_auto_hide_scrollbars() {
+    for auto_hide_scrollbars in [true, false] {
+        let mut test = launch_test(move || {
+            ScrollView::new()
+                .auto_hide_scrollbars(auto_hide_scrollbars)
+                .scrollbar(move |context: ScrollBarContext| {
+                    assert_eq!(context.auto_hide_scrollbars, auto_hide_scrollbars);
+                    ScrollBar::new(context).into()
+                })
+                .child(rect().width(Size::px(1000.)).height(Size::px(1000.)))
+        });
+        test.sync_and_update();
+        let scrollbars = test.find_many(|node, element| {
+            Rect::try_downcast(element)
+                .filter(|rect| rect.relative_layer == 999.into())
+                .map(|_| node)
+        });
+        assert_eq!(scrollbars.len(), 2);
+        for scrollbar in &scrollbars {
+            assert!(scrollbar.layout().area.width() > 0.);
+            assert!(scrollbar.layout().area.height() > 0.);
+        }
+
+        test.poll(Duration::from_millis(20), Duration::from_millis(1000));
+
+        for scrollbar in &scrollbars {
+            assert_eq!(scrollbar.layout().area.width() > 0., !auto_hide_scrollbars);
+            assert_eq!(scrollbar.layout().area.height() > 0., !auto_hide_scrollbars);
+            assert_eq!(scrollbar.children().is_empty(), auto_hide_scrollbars);
+        }
+    }
+}
+
+#[test]
+fn scroll_view_mixed_auto_hide_scrollbars() {
+    fn app() -> impl IntoElement {
+        rect()
+            .child(
+                ScrollView::new().height(Size::percent(50.)).child(
+                    rect().spacing(6.).children(
+                        (0..30).map(|_| rect().width(Size::fill()).height(Size::px(80.))),
+                    ),
+                ),
+            )
+            .child(
+                ScrollView::new()
+                    .auto_hide_scrollbars(false)
+                    .height(Size::percent(50.))
+                    .child(rect().horizontal().spacing(6.).children(
+                        (0..30).map(|_| rect().width(Size::px(80.)).height(Size::fill())),
+                    )),
+            )
+    }
+
+    let mut test = launch_test(app);
+    test.sync_and_update();
+    let scrollbars = test.find_many(|node, element| {
+        Rect::try_downcast(element)
+            .filter(|rect| rect.relative_layer == 999.into())
+            .map(|_| node)
+    });
+    assert_eq!(scrollbars.len(), 2);
+    test.move_cursor((495., 20.));
+    test.sync_and_update();
+    test.poll(Duration::from_millis(20), Duration::from_secs(2));
+    for scrollbar in &scrollbars {
+        assert!(scrollbar.layout().area.width() > 0.);
+        assert!(!scrollbar.children().is_empty());
+    }
+
+    test.move_cursor((100., 100.));
+    test.sync_and_update();
+    test.poll(Duration::from_millis(20), Duration::from_secs(2));
+
+    let visible_scrollbars = scrollbars
+        .iter()
+        .filter(|scrollbar| scrollbar.layout().area.width() > 0.)
+        .collect::<Vec<_>>();
+    for scrollbar in &scrollbars {
+        if scrollbar.layout().area.width() == 0. {
+            assert!(scrollbar.children().is_empty());
+        }
+    }
+    assert_eq!(visible_scrollbars.len(), 1);
+    assert!(visible_scrollbars[0].layout().area.width() > 20.);
+    assert_eq!(visible_scrollbars[0].layout().area.height(), 20.);
+}
+
+#[test]
 pub fn scroll_view_wheel() {
     fn scroll_view_wheel_app() -> impl IntoElement {
         ScrollView::new()
@@ -69,6 +361,7 @@ pub fn scroll_view_smooth_scrolling() {
         cursor: (5., 5.).into(),
         source: WheelSource::Line,
         timestamp: Instant::now(),
+        phase: TouchPhase::Moved,
     });
     test.sync_and_update();
 
@@ -173,8 +466,8 @@ pub fn scroll_view_scrollbar() {
     // Scroll up with arrows
     for _ in 0..5 {
         test.press_key(Key::Named(NamedKey::ArrowUp));
+        test.poll_n(Duration::from_millis(1), 5);
     }
-    test.poll(Duration::from_millis(1), Duration::from_millis(20));
 
     assert!(content[0].is_visible());
     assert!(content[1].is_visible());
@@ -183,12 +476,114 @@ pub fn scroll_view_scrollbar() {
 
     // Scroll to the bottom with arrows
     test.press_key(Key::Named(NamedKey::End));
-    test.poll(Duration::from_millis(1), Duration::from_millis(20));
+    test.poll_n(Duration::from_millis(1), 5);
 
     assert!(!content[0].is_visible());
     assert!(content[1].is_visible());
     assert!(content[2].is_visible());
     assert!(content[3].is_visible());
+}
+
+#[test]
+fn scroll_views_page_and_jump_along_the_scrollable_axis() {
+    for virtualized in [false, true] {
+        for horizontal in [false, true] {
+            let direction = if horizontal {
+                Direction::Horizontal
+            } else {
+                Direction::Vertical
+            };
+            let (mut test, controller) = TestingRunner::new(
+                move || {
+                    let controller = use_consume::<ScrollController>();
+                    if virtualized {
+                        VirtualScrollView::new_controlled(
+                            move |item, _| {
+                                rect()
+                                    .key(item.index)
+                                    .width(if horizontal {
+                                        Size::px(item.size)
+                                    } else {
+                                        Size::fill()
+                                    })
+                                    .height(if horizontal {
+                                        Size::fill()
+                                    } else {
+                                        Size::px(item.size)
+                                    })
+                                    .into()
+                            },
+                            controller,
+                        )
+                        .length(12usize)
+                        .item_size(60.)
+                        .direction(direction)
+                        .into_element()
+                    } else {
+                        ScrollView::new_controlled(controller)
+                            .child(
+                                rect()
+                                    .width(if horizontal {
+                                        Size::px(720.)
+                                    } else {
+                                        Size::fill()
+                                    })
+                                    .height(if horizontal {
+                                        Size::fill()
+                                    } else {
+                                        Size::px(720.)
+                                    }),
+                            )
+                            .into_element()
+                    }
+                },
+                (300., 200.).into(),
+                |runner| runner.provide_root_context(|| ScrollController::new(0., 0.)),
+                1.,
+            );
+            test.animation_clock().disable();
+            test.sync_and_update();
+
+            let thumb = if horizontal { (20., 195.) } else { (295., 20.) };
+            test.press_cursor(thumb);
+            test.move_cursor(thumb);
+            test.release_cursor(thumb);
+
+            let (arrow, line, page) = if horizontal {
+                (NamedKey::ArrowRight, 60., 300.)
+            } else {
+                (NamedKey::ArrowDown, 40., 200.)
+            };
+            let end = 720. - page;
+            let space = Key::Character(" ".into());
+            let no_modifiers = Modifiers::empty();
+            for (key, modifiers, offset) in [
+                (Key::Named(arrow), no_modifiers, line),
+                (Key::Named(NamedKey::PageDown), no_modifiers, line + page),
+                (Key::Named(NamedKey::PageUp), no_modifiers, line),
+                (space.clone(), no_modifiers, line + page),
+                (space.clone(), Modifiers::CONTROL, line + page),
+                (space, Modifiers::SHIFT, line),
+                (Key::Named(NamedKey::End), no_modifiers, end),
+                (Key::Named(NamedKey::PageDown), no_modifiers, end),
+                (Key::Named(NamedKey::Home), no_modifiers, 0.),
+            ] {
+                test.send_event(PlatformEvent::Keyboard {
+                    name: KeyboardEventName::KeyDown,
+                    key,
+                    code: Code::Unidentified,
+                    modifiers,
+                });
+                test.sync_and_update();
+                let expected = if horizontal {
+                    (offset, 0.)
+                } else {
+                    (0., offset)
+                };
+                assert_eq!(test.run_in(|| controller.position()), expected.into());
+            }
+        }
+    }
 }
 
 #[test]
@@ -277,7 +672,7 @@ pub fn scroll_view_drag_scrolling_horizontal() {
     fn scroll_view_drag_horizontal_app() -> impl IntoElement {
         ScrollView::new()
             .drag_scrolling(true)
-            .direction(Direction::Horizontal)
+            .horizontal()
             .child(rect().height(Size::px(200.)).width(Size::px(200.)))
             .child(rect().height(Size::px(200.)).width(Size::px(200.)))
             .child(rect().height(Size::px(200.)).width(Size::px(200.)))
@@ -337,7 +732,7 @@ pub fn scroll_view_wheel_latching() {
             .child(rect().height(Size::px(200.)).width(Size::fill()))
     }
 
-    let mut test = launch_test(latching_app);
+    let mut test = launch_device_test(latching_app);
     let outer = test
         .find(|node, element| {
             Rect::try_downcast(element)
@@ -356,24 +751,24 @@ pub fn scroll_view_wheel_latching() {
 
     // A gesture starting over the inner view (which can move down) latches to it: the inner
     // scrolls to its end, and the surplus of the same gesture must NOT chain to the outer.
-    test.scroll((100., 100.), (0., -200.));
+    test.scroll_pixels((100., 100.), (0., -200.));
     assert!(inner_content[1].is_visible());
     assert!(!outer_content[3].is_visible());
-    test.scroll((100., 100.), (0., -300.)); // same gesture, inner already at its end
+    test.scroll_pixels((100., 100.), (0., -300.)); // same gesture, inner already at its end
     assert!(!outer_content[3].is_visible());
 
     // A NEW gesture starting with the inner at its end passes through wholesale, so the
     // outer takes over.
     end_gesture();
-    test.scroll((100., 100.), (0., -300.));
+    test.scroll_pixels((100., 100.), (0., -300.));
     assert!(outer_content[3].is_visible());
 
     // Reset: scroll the outer back up (the inner sits off screen above), then latch a new
     // gesture to the inner to bring it back to its top.
     end_gesture();
-    test.scroll((100., 250.), (0., 300.));
+    test.scroll_pixels((100., 250.), (0., 300.));
     end_gesture();
-    test.scroll((100., 100.), (0., 200.));
+    test.scroll_pixels((100., 100.), (0., 200.));
     assert!(!inner_content[1].is_visible());
     assert!(!outer_content[3].is_visible());
 
@@ -381,8 +776,8 @@ pub fn scroll_view_wheel_latching() {
     // content brings the inner under the pointer mid-gesture, the inner must not steal the
     // gesture even though it could scroll, so the outer keeps moving and the inner stays put.
     end_gesture();
-    test.scroll((100., 250.), (0., -150.));
-    test.scroll((100., 25.), (0., -150.)); // now over the inner, same gesture
+    test.scroll_pixels((100., 250.), (0., -150.));
+    test.scroll_pixels((100., 25.), (0., -150.)); // now over the inner, same gesture
     assert!(!inner_content[1].is_visible());
     assert!(outer_content[3].is_visible());
 }
@@ -408,7 +803,7 @@ pub fn scroll_view_wheel_latching_nested() {
             .child(rect().height(Size::px(200.)).width(Size::fill()))
     }
 
-    let mut test = launch_test(nested_latching_app);
+    let mut test = launch_device_test(nested_latching_app);
     let outer = test
         .find(|node, element| {
             Rect::try_downcast(element)
@@ -420,13 +815,13 @@ pub fn scroll_view_wheel_latching_nested() {
     let inner_content = outer_content[0].children()[0].children()[0].children();
 
     // The inner view can move, so it takes the gesture and the outer never sees it.
-    test.scroll((100., 100.), (0., -200.));
+    test.scroll_pixels((100., 100.), (0., -200.));
     assert!(inner_content[1].is_visible());
     assert!(!outer_content[3].is_visible());
 
     // A new gesture with the inner at its end: the inner declines, so the outer takes it.
     std::thread::sleep(Duration::from_millis(300));
-    test.scroll((100., 100.), (0., -300.));
+    test.scroll_pixels((100., 100.), (0., -300.));
     assert!(outer_content[3].is_visible());
 }
 
@@ -532,4 +927,16 @@ pub fn scroll_view_wheel_acceleration() {
     test.scroll_lines_at((5., 5.), (0., -1.), start + Duration::from_millis(90));
     settle(&mut test);
     assert_eq!(first_visible_item(&test), 0);
+}
+
+/// A runner whose wheel events are shaped as a desktop device's, without the smoothing a Linux
+/// touchpad gesture gets, so a test can read where a wheel event landed straight away.
+fn launch_device_test(app: impl Into<freya_core::integration::AppComponent>) -> TestingRunner {
+    TestingRunner::new(
+        app,
+        (500., 500.).into(),
+        |runner| runner.provide_root_context(|| TargetPlatform::Windows),
+        1.,
+    )
+    .0
 }

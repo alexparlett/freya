@@ -104,7 +104,7 @@ impl FreyaPlugin for BorderlessPlugin {
                 if window.fullscreen().is_some() || window.is_maximized() {
                     return;
                 }
-                let size = window.inner_size();
+                let size = window.surface_size();
                 let radius = self.corner_radius * window.scale_factor() as f32;
                 let rounded_window = RRect::new_rect_xy(
                     SkRect::from_wh(size.width as f32, size.height as f32),
@@ -151,7 +151,7 @@ pub fn use_maximized() -> State<bool> {
     let mut maximized = use_state(|| false);
 
     use_side_effect(move || {
-        let _ = Platform::get().root_size.read();
+        let _ = Platform::get().current_window().root_size.read();
         Platform::get().with_window(Platform::window_id(), move |window| {
             if let Some(mut maximized) = maximized.try_write() {
                 *maximized = window.fullscreen().is_some() || window.is_maximized();
@@ -170,7 +170,7 @@ pub struct ResizeBands {
 }
 
 impl KeyExt for ResizeBands {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -188,7 +188,7 @@ impl ResizeBands {
 impl Component for ResizeBands {
     fn render(&self) -> impl IntoElement {
         let maximized = use_maximized();
-        let size = *Platform::get().root_size.read();
+        let size = *Platform::get().current_window().root_size.read();
 
         rect()
             .layer(Layer::Overlay)

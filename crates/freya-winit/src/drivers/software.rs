@@ -1,9 +1,6 @@
 use std::num::NonZeroU32;
-#[cfg(target_os = "windows")]
-use std::time::{
-    Duration,
-    Instant,
-};
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+use std::time::Instant;
 
 use freya_engine::prelude::{
     AlphaType,
@@ -58,24 +55,24 @@ pub struct SoftwareDriver {
     /// How the buffer's alpha reaches the compositor: kept for a transparent window, else
     /// ignored.
     alpha: softbuffer::AlphaMode,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     last_present: Option<Instant>,
 }
 
 impl SoftwareDriver {
     pub fn new(
-        event_loop: &ActiveEventLoop,
+        event_loop: &dyn ActiveEventLoop,
         window_attributes: WindowAttributes,
-    ) -> Result<(Self, Window), Box<dyn std::error::Error>> {
-        let transparent = window_attributes.transparent;
+    ) -> Result<(Self, Box<dyn Window>), Box<dyn std::error::Error>> {
+        let transparent = window_attributes.transparent();
         let window = event_loop.create_window(window_attributes)?;
-        let driver = Self::from_window(&window, transparent)?;
+        let driver = Self::from_window(window.as_ref(), transparent)?;
         Ok((driver, window))
     }
 
     /// Build the driver on an existing window instead of creating a new one.
     pub fn from_window(
-        window: &Window,
+        window: &dyn Window,
         transparent: bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let display_handle = window.display_handle()?.as_raw();
@@ -94,7 +91,7 @@ impl SoftwareDriver {
                 softbuffer::AlphaMode::Ignored
             };
 
-        let size = window.inner_size();
+        let size = window.surface_size();
         if let (Some(width), Some(height)) =
             (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
         {
@@ -107,44 +104,31 @@ impl SoftwareDriver {
             _context: context,
             surface,
             alpha,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             last_present: None,
         })
     }
 
-    /// Block until the display takes the frame, since softbuffer's GDI blit never waits for it.
-    #[cfg(target_os = "windows")]
-    fn wait_for_display(&mut self, window: &Window) {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    fn wait_for_display(&mut self, window: &dyn Window) {
+        #[cfg(target_os = "windows")]
         // SAFETY: `DwmFlush` takes no arguments and only blocks until the next composition.
         if unsafe { DwmFlush() } >= 0 {
             return;
         }
 
-        let refresh_rate = window
-            .current_monitor()
-            .and_then(|monitor| monitor.refresh_rate_millihertz())
-            .filter(|refresh_rate| *refresh_rate > 1_000)
-            .unwrap_or(60_000);
-        let frame_interval = Duration::from_secs_f64(1000.0 / refresh_rate as f64);
-
-        if let Some(last_present) = self.last_present
-            && let Some(remaining) = frame_interval.checked_sub(last_present.elapsed())
-        {
-            std::thread::sleep(remaining);
-        }
-
-        self.last_present = Some(Instant::now());
+        crate::drivers::wait_for_display(window, &mut self.last_present);
     }
 
     pub fn present(
         &mut self,
         size: PhysicalSize<u32>,
-        window: &Window,
+        window: &dyn Window,
         render: impl FnOnce(&mut SkiaSurface),
     ) {
         self.present_frame(size, window, render);
 
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         self.wait_for_display(window);
     }
 
@@ -152,7 +136,7 @@ impl SoftwareDriver {
     fn present_frame(
         &mut self,
         size: PhysicalSize<u32>,
-        window: &Window,
+        window: &dyn Window,
         render: impl FnOnce(&mut SkiaSurface),
     ) {
         let (Some(width), Some(height)) =

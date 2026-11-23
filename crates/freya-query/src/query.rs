@@ -281,8 +281,8 @@ impl<Q: QueryCapability> QueriesStorage<Q> {
         let mock: QueryMock<Q> = Rc::new(move |keys| Box::pin(mock(keys)));
 
         Self {
-            storage: State::create_in_scope(HashMap::default(), ScopeId::ROOT),
-            mock: State::create_in_scope(Some(mock), ScopeId::ROOT),
+            storage: State::create_global(HashMap::default()),
+            mock: State::create_global(Some(mock)),
         }
     }
 
@@ -329,7 +329,7 @@ impl<Q: QueryCapability> QueriesStorage<Q> {
             _ => false,
         };
         if create_interval_task {
-            let task = spawn_forever(async move {
+            let task = spawn_in_window(async move {
                 loop {
                     // Wait as long as the stale time is configured
                     timer(interval).await;
@@ -398,7 +398,7 @@ impl<Q: QueryCapability> QueriesStorage<Q> {
         let storage = self.storage;
         let subscribers = query_data.subscribers.clone();
         let running = query_data.running.clone();
-        *clean_task = Some(spawn_forever(async move {
+        *clean_task = Some(spawn_in_window(async move {
             loop {
                 // Wait as long as the clean time is configured
                 timer(query.clean_time).await;
@@ -729,27 +729,32 @@ impl<Q: QueryCapability> QueryReader<Q> {
         self.state.borrow()
     }
 
-    /// Get the result of the query if it has settled.
+    /// Get the result of the query if it has settled, or its previous result while it reloads.
     pub fn ok(&'_ self) -> Option<Ref<'_, Result<Q::Ok, Q::Err>>> {
         Ref::filter_map(self.state.borrow(), |state| match state {
-            QueryStateData::Settled { res, .. } => Some(res),
+            QueryStateData::Settled { res, .. } | QueryStateData::Loading { res: Some(res) } => {
+                Some(res)
+            }
             _ => None,
         })
         .ok()
     }
 
-    /// Get the error of the query if it has settled with one.
+    /// Get the error of the query if it has settled with one or is reloading after one.
     pub fn err(&'_ self) -> Option<Ref<'_, Q::Err>> {
         Ref::filter_map(self.state.borrow(), |state| match state {
-            QueryStateData::Settled { res: Err(err), .. } => Some(err),
+            QueryStateData::Settled { res: Err(err), .. }
+            | QueryStateData::Loading {
+                res: Some(Err(err)),
+            } => Some(err),
             _ => None,
         })
         .ok()
     }
 
-    /// Get the result of the query, panics if it has not settled.
+    /// Get the result of the query, panics if it has no data.
     pub fn unwrap(&'_ self) -> Ref<'_, Result<Q::Ok, Q::Err>> {
-        self.ok().expect("Query is not settled.")
+        self.ok().expect("Query has no data.")
     }
 }
 
@@ -851,7 +856,7 @@ impl<Q: QueryCapability> UseQuery<Q> {
         };
 
         // Run the query
-        spawn_forever(async move { QueriesStorage::run_queries(&[(&query, &query_data)]).await });
+        spawn_in_window(async move { QueriesStorage::run_queries(&[(&query, &query_data)]).await });
     }
 }
 
@@ -911,11 +916,11 @@ pub fn use_query<Q: QueryCapability>(query: Query<Q>) -> UseQuery<Q> {
             && query_data.state.borrow().is_stale(query)
         {
             // Marked as running here, before spawning, and not just inside `run_queries`:
-            // `spawn_forever` only queues the task, so any other subscriber mounting before the
+            // `spawn_in_window` only queues the task, so any other subscriber mounting before the
             // runner gets to poll it would otherwise still see this query as idle
             let running_guard = query_data.running_guard();
             let query = query.clone();
-            spawn_forever(async move {
+            spawn_in_window(async move {
                 let _running_guard = running_guard;
                 QueriesStorage::run_queries(&[(&query, &query_data)]).await;
             });

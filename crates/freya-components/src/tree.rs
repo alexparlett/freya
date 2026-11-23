@@ -57,7 +57,7 @@ define_theme! {
 
 /// Wheel axis-lock threshold: `1.0` commits a gesture to whichever axis dominates. Raise it to
 /// allow more diagonal freedom before locking.
-const WHEEL_AXIS_LOCK: f32 = 1.0;
+const WHEEL_AXIS_LOCK: f64 = 1.0;
 
 /// Metrics every [`TreeItem`] reads from its [`Tree`], so indentation and row height are set once
 /// on the tree rather than repeated on every row.
@@ -222,13 +222,13 @@ impl TreeItem {
 }
 
 impl ChildrenExt for TreeItem {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
 
 impl KeyExt for TreeItem {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -493,7 +493,7 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> Tree<D, B> {
 }
 
 impl<D, B: Fn(VirtualItem, &D) -> Element> LayoutExt for Tree<D, B> {
-    fn get_layout(&mut self) -> &mut LayoutData {
+    fn layout_mut(&mut self) -> &mut LayoutData {
         &mut self.layout
     }
 }
@@ -501,7 +501,7 @@ impl<D, B: Fn(VirtualItem, &D) -> Element> LayoutExt for Tree<D, B> {
 impl<D, B: Fn(VirtualItem, &D) -> Element> ContainerExt for Tree<D, B> {}
 
 impl<D: PartialEq, B: Fn(VirtualItem, &D) -> Element> KeyExt for Tree<D, B> {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }

@@ -1,5 +1,6 @@
 use freya_core::prelude::*;
 use torin::{
+    content::Content,
     gaps::Gaps,
     size::Size,
 };
@@ -7,10 +8,6 @@ use torin::{
 use crate::{
     define_theme,
     get_theme,
-    icons::{
-        IconThemePartialExt,
-        tick::TickIcon,
-    },
 };
 
 define_theme! {
@@ -27,7 +24,6 @@ define_theme! {
         width: Size,
         height: Size,
         color: Color,
-        selected_icon_fill: Color,
     }
 }
 
@@ -144,13 +140,13 @@ impl ButtonSegment {
 }
 
 impl ChildrenExt for ButtonSegment {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
 
 impl KeyExt for ButtonSegment {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -173,7 +169,6 @@ impl Component for ButtonSegment {
             width,
             height,
             color,
-            selected_icon_fill,
         } = theme;
 
         let on_press = self.on_press.clone();
@@ -196,6 +191,7 @@ impl Component for ButtonSegment {
 
         let background = match status() {
             _ if !self.enabled => disabled_background,
+            ButtonSegmentStatus::Hovering if self.selected => selected_background * 0.94,
             _ if self.selected => selected_background,
             ButtonSegmentStatus::Hovering => hover_background,
             ButtonSegmentStatus::Idle => background,
@@ -214,6 +210,7 @@ impl Component for ButtonSegment {
 
         rect()
             .a11y_id(a11y_id)
+            .a11y_enabled(self.enabled)
             .a11y_focusable(self.enabled)
             .a11y_role(AccessibilityRole::Button)
             .maybe(self.enabled, |rect| rect.on_press(on_press))
@@ -231,14 +228,16 @@ impl Component for ButtonSegment {
             .overflow(Overflow::Clip)
             .color(color.mul_if(!self.enabled, 0.9))
             .background(background.mul_if(!self.enabled, 0.9))
+            .corner_radius(8.)
+            .maybe(self.enabled && focus() == Focus::Keyboard, |el| {
+                el.border(
+                    Border::new()
+                        .fill(color.with_a(130))
+                        .width(2.)
+                        .alignment(BorderAlignment::Inner),
+                )
+            })
             .center()
-            .spacing(4.)
-            .maybe_child(self.selected.then(|| {
-                TickIcon::new()
-                    .fill(selected_icon_fill)
-                    .width(Size::px(12.))
-                    .height(Size::px(12.))
-            }))
             .children(self.children.clone())
     }
 
@@ -302,13 +301,13 @@ impl SegmentedButton {
 }
 
 impl ChildrenExt for SegmentedButton {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
 
 impl KeyExt for SegmentedButton {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
@@ -332,11 +331,14 @@ impl Component for SegmentedButton {
             .background(background)
             .border(
                 Border::new()
-                    .fill(border_fill)
+                    .fill(border_fill.with_a(100))
                     .width(1.)
-                    .alignment(BorderAlignment::Outer),
+                    .alignment(BorderAlignment::Inner),
             )
+            .padding(4.)
+            .spacing(4.)
             .corner_radius(corner_radius)
+            .content(Content::Fit)
             .horizontal()
             .children(self.children.clone())
     }

@@ -40,6 +40,7 @@ use crate::{
     event_handler::EventHandler,
     events::{
         data::{
+            AccessibilityActionEventData,
             Event,
             KeyboardEventData,
             MouseEventData,
@@ -56,16 +57,13 @@ use crate::{
     node_id::NodeId,
     prelude::{
         Color,
-        FileEventData,
+        DragEventData,
         ImePreeditEventData,
         MaybeExt,
     },
     style::fill::Fill,
     text_cache::TextCache,
-    tree::{
-        DiffModifies,
-        Tree,
-    },
+    tree::DiffModifies,
 };
 
 /// Tells Freya how to lay out, handle events for, describe accessibility and draw an element.
@@ -180,6 +178,11 @@ pub trait ElementExt: Any {
     /// Applies clipping for this element before it and its children are rendered.
     fn clip(&self, _context: ClipContext) {}
 
+    /// Whether this element paints content, excluding backdrop effects and descendants.
+    fn paints_content(&self) -> bool {
+        true
+    }
+
     /// Renders this element using the supplied canvas and layout context.
     fn render(&self, _context: RenderContext) {}
 
@@ -221,7 +224,6 @@ pub struct RenderContext<'a> {
     pub canvas: &'a Canvas,
     pub layout_node: &'a LayoutNode,
     pub text_style_state: &'a TextStyleState,
-    pub tree: &'a Tree,
     pub scale_factor: f64,
 }
 
@@ -259,6 +261,37 @@ pub trait ComponentProps: Any {
     fn changed(&self, other: &dyn ComponentProps) -> bool;
 }
 
+#[derive(Clone, Debug)]
+pub enum ElementChildren {
+    Owned(Vec<Element>),
+    Retained(Rc<Vec<Element>>),
+}
+
+impl Default for ElementChildren {
+    fn default() -> Self {
+        Self::Owned(Vec::new())
+    }
+}
+
+impl From<Vec<Element>> for ElementChildren {
+    fn from(children: Vec<Element>) -> Self {
+        Self::Owned(children)
+    }
+}
+
+impl PartialEq for ElementChildren {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Owned(children), Self::Owned(previous)) => children == previous,
+            (Self::Retained(children), Self::Retained(previous)) => {
+                Rc::ptr_eq(children, previous) || children == previous
+            }
+            (Self::Owned(owned), Self::Retained(retained))
+            | (Self::Retained(retained), Self::Owned(owned)) => owned == retained.as_ref(),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum Element {
     Component {
@@ -269,7 +302,7 @@ pub enum Element {
     Element {
         key: DiffKey,
         element: Rc<dyn ElementExt>,
-        elements: Vec<Element>,
+        elements: ElementChildren,
     },
 }
 
@@ -485,6 +518,7 @@ pub type EventHandlers = FxHashMap<EventName, EventHandlerType>;
 
 #[derive(Clone, PartialEq)]
 pub enum EventHandlerType {
+    AccessibilityAction(EventHandler<Event<AccessibilityActionEventData>>),
     Mouse(EventHandler<Event<MouseEventData>>),
     Keyboard(EventHandler<Event<KeyboardEventData>>),
     Sized(EventHandler<Event<SizedEventData>>),
@@ -494,5 +528,5 @@ pub enum EventHandlerType {
     Touch(EventHandler<Event<TouchEventData>>),
     Pointer(EventHandler<Event<PointerEventData>>),
     ImePreedit(EventHandler<Event<ImePreeditEventData>>),
-    File(EventHandler<Event<FileEventData>>),
+    Drag(EventHandler<Event<DragEventData>>),
 }

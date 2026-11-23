@@ -1,292 +1,150 @@
-//! Provides a clipboard abstraction to access the target system's clipboard.
+use std::{
+    fmt,
+    future::Future,
+    rc::Rc,
+};
 
 use freya_core::prelude::*;
+use futures_util::future::LocalBoxFuture;
 
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ClipboardError {
     FailedToRead,
     FailedToSet,
     NotAvailable,
+    UnsupportedFormat,
 }
 
-/// Raw pixels of an image on the clipboard.
-///
-/// Four channels per pixel (red, green, blue, alpha), one byte each, **unpremultiplied**, in
-/// row-major order: the pixel at `(x, y)` starts at `(y * width + x) * 4`. A `2x1` image is
-/// therefore eight bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClipboardImage {
-    pub width: usize,
-    pub height: usize,
-    pub rgba: Vec<u8>,
-}
-
-impl ClipboardImage {
-    /// Whether the buffer holds exactly the pixels the size claims, and at least one of them.
-    ///
-    /// Checked before an image reaches a provider, because a platform handed a short buffer
-    /// reads past the pixels it was promised.
-    fn is_well_formed(&self) -> bool {
-        let expected = self
-            .width
-            .checked_mul(self.height)
-            .and_then(|pixels| pixels.checked_mul(4));
-        !self.rgba.is_empty() && expected == Some(self.rgba.len())
-    }
-}
-
-/// What the platform integration supplies so [Clipboard] has somewhere to read and write.
-///
-/// Provided into the root context as a `Box<dyn ClipboardProvider>` by whichever integration is
-/// driving the app ([ClipboardContext] is the one every desktop backend uses), so a host that
-/// speaks to something other than the desktop clipboard has a seam to speak through.
-///
-/// **Text and images are one provider**, because they are one clipboard: two providers would be
-/// two connections claiming the same selection, and on the platforms that serve a paste out of
-/// the process that copied, whichever was written last would own it.
-pub trait ClipboardProvider {
-    fn get_text(&mut self) -> Result<String, ClipboardError>;
-
-    fn set_text(&mut self, contents: String) -> Result<(), ClipboardError>;
-
-    fn get_image(&mut self) -> Result<ClipboardImage, ClipboardError>;
-
-    /// Write `image` to the clipboard. Its buffer is already known to match its stated size,
-    /// because [Clipboard::set_image] checks that before dispatching here.
-    fn set_image(&mut self, image: ClipboardImage) -> Result<(), ClipboardError>;
-}
-
-/// The desktop clipboard, over [arboard].
-///
-/// Held by the integration for as long as the app runs rather than opened per call: X11 has no
-/// clipboard daemon of its own, so the pasting application reads from the copying one and a
-/// handle dropped at the end of a copy takes what was copied with it.
-///
-/// # Linux
-///
-/// The `wayland-data-control` feature is on, so a session with `WAYLAND_DISPLAY` set talks to the
-/// compositor over `wlr-data-control` / `ext-data-control` (wlroots, KDE, GNOME 48 and up).
-/// Where the compositor does not offer either protocol, arboard warns and falls back to its X11
-/// backend, which under a Wayland session reaches the compositor's XWayland bridge.
-///
-/// That is a different route from the `wl_data_device` one a text-only clipboard can take on its
-/// own display connection. It is the trade for images: no crate speaks the standard protocol
-/// *and* carries image data, and a second provider for text alone would put two connections on
-/// one selection.
-///
-/// # Android and the web
-///
-/// There is no desktop clipboard to open, and arboard has a backend for neither, so on both this
-/// is a context that never opens: [`new`](Self::new) answers [ClipboardError::NotAvailable] and
-/// the integration provides no provider at all, which is what every [Clipboard] call then
-/// reports. Each platform's own clipboard is reached by its own route and belongs to whoever
-/// adds it, not to a stub: a JNI call through the activity on Android, and on the web the
-/// browser's, which `freya-web` supplies as a provider of its own.
-#[cfg(not(any(target_os = "android", target_family = "wasm")))]
-pub struct ClipboardContext(arboard::Clipboard);
-
-#[cfg(not(any(target_os = "android", target_family = "wasm")))]
-impl ClipboardContext {
-    /// Open the desktop clipboard, or [ClipboardError::NotAvailable] where there is none.
-    pub fn new() -> Result<Self, ClipboardError> {
-        arboard::Clipboard::new()
-            .map(Self)
-            .map_err(|_| ClipboardError::NotAvailable)
-    }
-}
-
-#[cfg(not(any(target_os = "android", target_family = "wasm")))]
-impl ClipboardProvider for ClipboardContext {
-    fn get_text(&mut self) -> Result<String, ClipboardError> {
-        self.0.get_text().map_err(|_| ClipboardError::FailedToRead)
-    }
-
-    fn set_text(&mut self, contents: String) -> Result<(), ClipboardError> {
-        self.0
-            .set_text(contents)
-            .map_err(|_| ClipboardError::FailedToSet)
-    }
-
-    fn get_image(&mut self) -> Result<ClipboardImage, ClipboardError> {
-        let image = self
-            .0
-            .get_image()
-            .map_err(|_| ClipboardError::FailedToRead)?;
-        Ok(ClipboardImage {
-            width: image.width,
-            height: image.height,
-            rgba: image.bytes.into_owned(),
+impl fmt::Display for ClipboardError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::FailedToRead => "Could not read the clipboard",
+            Self::FailedToSet => "Could not write to the clipboard",
+            Self::NotAvailable => "The clipboard is unavailable",
+            Self::UnsupportedFormat => "The requested clipboard format is unavailable",
         })
     }
-
-    fn set_image(&mut self, image: ClipboardImage) -> Result<(), ClipboardError> {
-        self.0
-            .set_image(arboard::ImageData {
-                width: image.width,
-                height: image.height,
-                bytes: image.rgba.into(),
-            })
-            .map_err(|_| ClipboardError::FailedToSet)
-    }
 }
 
-/// See [ClipboardContext]'s Android and the web section: a context that never opens.
-///
-/// The trait is still implemented because the integrations coerce a context to
-/// `Box<dyn ClipboardProvider>`, so the type has to satisfy it to compile; the impl is not
-/// reachable, since [`new`](Self::new) hands back no context to call it on.
-#[cfg(any(target_os = "android", target_family = "wasm"))]
-pub struct ClipboardContext;
+impl std::error::Error for ClipboardError {}
 
-#[cfg(any(target_os = "android", target_family = "wasm"))]
-impl ClipboardContext {
-    /// Always [ClipboardError::NotAvailable] on Android.
-    pub fn new() -> Result<Self, ClipboardError> {
-        Err(ClipboardError::NotAvailable)
-    }
+pub type ClipboardFuture<T> = LocalBoxFuture<'static, Result<T, ClipboardError>>;
+
+/// Methods for reading from and writing to the clipboard.
+pub trait ClipboardProvider {
+    fn get(&self, format: DataFormat) -> ClipboardFuture<DataValue>;
+    fn set(&self, data: TransferData) -> ClipboardFuture<()>;
 }
 
-#[cfg(any(target_os = "android", target_family = "wasm"))]
-impl ClipboardProvider for ClipboardContext {
-    fn get_text(&mut self) -> Result<String, ClipboardError> {
-        Err(ClipboardError::NotAvailable)
-    }
-
-    fn set_text(&mut self, _contents: String) -> Result<(), ClipboardError> {
-        Err(ClipboardError::NotAvailable)
-    }
-
-    fn get_image(&mut self) -> Result<ClipboardImage, ClipboardError> {
-        Err(ClipboardError::NotAvailable)
-    }
-
-    fn set_image(&mut self, _image: ClipboardImage) -> Result<(), ClipboardError> {
-        Err(ClipboardError::NotAvailable)
-    }
-}
-
-/// App clipboard.
+/// Clipboard integration for Freya apps.
 ///
 /// # Examples
 ///
-/// ```rust,no_run
-/// use freya_clipboard::prelude::Clipboard;
+/// ```no_run
+/// use freya_clipboard::prelude::{
+///     Clipboard,
+///     ClipboardError,
+/// };
 ///
-/// // Read the clipboard content
-/// if let Ok(content) = Clipboard::get() {
-///     println!("{}", content);
+/// async fn read_and_write_clipboard() -> Result<(), ClipboardError> {
+///     let content = Clipboard::get_text().await?;
+///     println!("{content}");
+///     Clipboard::set_text("Hello, Freya!".to_string()).await
 /// }
-///
-/// // Write to the clipboard
-/// Clipboard::set("Hello, Freya!".to_string());
 /// ```
 #[derive(Clone, Copy, PartialEq)]
-pub struct Clipboard(State<Option<Box<dyn ClipboardProvider>>>);
+pub struct Clipboard(State<Rc<dyn ClipboardProvider>>);
 
 impl Clipboard {
-    pub fn create(provider: Option<Box<dyn ClipboardProvider>>) -> Self {
-        Self(State::create_global(provider))
+    #[doc(hidden)]
+    pub fn create(provider: Box<dyn ClipboardProvider>) -> Self {
+        Self(State::create_global(Rc::from(provider)))
     }
 
-    /// Read from the clipboard.
-    #[track_caller]
-    pub fn get() -> Result<String, ClipboardError> {
-        Self::with_provider(|provider| provider.get_text())?
-    }
-
-    /// Write to the clipboard.
-    #[track_caller]
-    pub fn set(contents: String) -> Result<(), ClipboardError> {
-        Self::with_provider(|provider| provider.set_text(contents))?
-    }
-
-    /// Read an image from the clipboard.
+    /// Reads the requested format from the clipboard.
     ///
-    /// # Examples
+    /// # Example
     ///
-    /// ```rust,no_run
-    /// use freya_clipboard::prelude::Clipboard;
-    ///
-    /// if let Ok(image) = Clipboard::get_image() {
-    ///     println!("{}x{}", image.width, image.height);
-    /// }
-    /// ```
-    pub fn get_image() -> Result<ClipboardImage, ClipboardError> {
-        Self::with_provider(|provider| provider.get_image())?
-    }
-
-    /// Write an image to the clipboard.
-    ///
-    /// The pixel buffer has to match the stated size ([ClipboardImage]), or the write is refused
-    /// here rather than handed to a provider to interpret.
-    ///
-    /// # Examples
-    ///
-    /// ```rust,no_run
+    /// ```no_run
     /// use freya_clipboard::prelude::{
     ///     Clipboard,
-    ///     ClipboardImage,
+    ///     ClipboardError,
+    ///     DataFormat,
+    ///     DataValue,
     /// };
     ///
-    /// // A single red pixel
-    /// let _ = Clipboard::set_image(ClipboardImage {
-    ///     width: 1,
-    ///     height: 1,
-    ///     rgba: vec![255, 0, 0, 255],
-    /// });
+    /// async fn read_html() -> Result<DataValue, ClipboardError> {
+    ///     Clipboard::get(DataFormat::Html).await
+    /// }
     /// ```
-    pub fn set_image(image: ClipboardImage) -> Result<(), ClipboardError> {
-        if !image.is_well_formed() {
-            return Err(ClipboardError::FailedToSet);
-        }
-        Self::with_provider(|provider| provider.set_image(image))?
+    #[track_caller]
+    pub fn get(format: DataFormat) -> ClipboardFuture<DataValue> {
+        Self::provider().get(format)
     }
 
-    fn with_provider<T>(
-        run: impl FnOnce(&mut dyn ClipboardProvider) -> T,
-    ) -> Result<T, ClipboardError> {
-        let mut clipboard = GlobalContexts::get().get_context::<Clipboard>();
-        let mut provider = clipboard.0.write();
-        let provider = provider.as_mut().ok_or(ClipboardError::NotAvailable)?;
-        Ok(run(provider.as_mut()))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use crate::clipboard::{
-        ClipboardContext,
-        ClipboardImage,
-        ClipboardProvider,
-    };
-
-    /// A buffer that does not match the stated size never reaches a provider: the platform would
-    /// read past the pixels it was promised.
+    /// Replaces the clipboard with data offered in one or more formats.
     ///
-    /// Asserted against the guard rather than through [Clipboard](crate::clipboard::Clipboard),
-    /// which reads a root context that a unit test has no runner to provide.
-    #[test]
-    fn an_image_whose_buffer_disagrees_with_its_size_is_refused() {
-        let image = |width, height, rgba: Vec<u8>| ClipboardImage {
-            width,
-            height,
-            rgba,
-        };
-
-        assert!(image(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).is_well_formed());
-        assert!(!image(2, 1, vec![255, 0, 0, 255]).is_well_formed());
-        assert!(!image(1, 1, vec![255, 0, 0, 255, 0]).is_well_formed());
-        assert!(!image(0, 0, Vec::new()).is_well_formed());
-        // The size alone would overflow the multiply, so there is no length that could match it.
-        assert!(!image(usize::MAX, 2, vec![0; 8]).is_well_formed());
+    /// # Example
+    ///
+    /// ```no_run
+    /// use freya_clipboard::prelude::{
+    ///     Clipboard,
+    ///     ClipboardError,
+    ///     DataFormat,
+    ///     DataValue,
+    ///     TransferData,
+    /// };
+    ///
+    /// async fn copy_greeting() -> Result<(), ClipboardError> {
+    ///     let data = TransferData::text("Hello, Freya!").with(
+    ///         DataFormat::Html,
+    ///         DataValue::Text("<strong>Hello, Freya!</strong>".into()),
+    ///     );
+    ///     Clipboard::set(data).await
+    /// }
+    /// ```
+    #[track_caller]
+    pub fn set(data: TransferData) -> ClipboardFuture<()> {
+        Self::provider().set(data)
     }
 
-    /// The desktop clipboard is a [ClipboardProvider] — that is what the platform integrations
-    /// box up and provide. Compile-time only: opening a real clipboard is the integration's job,
-    /// and a headless test host has none.
-    #[test]
-    fn the_desktop_clipboard_is_a_provider() {
-        fn provider<T: ClipboardProvider + 'static>() {}
-        provider::<ClipboardContext>();
+    /// Starts a text clipboard read and returns its asynchronous result.
+    pub fn get_text() -> impl Future<Output = Result<String, ClipboardError>> {
+        let read = Self::get(DataFormat::Text);
+        async move {
+            match read.await? {
+                DataValue::Text(text) => Ok(text),
+                DataValue::Bytes(bytes) => {
+                    String::from_utf8(bytes).map_err(|_| ClipboardError::FailedToRead)
+                }
+                DataValue::Files(_) => Err(ClipboardError::FailedToRead),
+            }
+        }
+    }
+
+    /// Starts a text clipboard write and returns its asynchronous result.
+    pub fn set_text(contents: String) -> ClipboardFuture<()> {
+        Self::set(TransferData::text(contents))
+    }
+
+    /// Writes without awaiting the result and discards any errors.
+    pub fn set_deferred(data: TransferData) {
+        let write = Self::set(data);
+        spawn_global(async move {
+            let _ = write.await;
+        });
+    }
+
+    /// Writes text without awaiting the result and discards any errors.
+    pub fn set_text_deferred(contents: String) {
+        Self::set_deferred(TransferData::text(contents));
+    }
+
+    #[track_caller]
+    fn provider() -> Rc<dyn ClipboardProvider> {
+        let clipboard = GlobalContexts::get()
+            .try_get_context::<Self>()
+            .expect("Clipboard access requires a registered clipboard provider.");
+        clipboard.0.peek().clone()
     }
 }

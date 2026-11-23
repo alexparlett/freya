@@ -1,8 +1,14 @@
-# Shared policy: judges every benchmark without its own
-# `hotpath/<benchmark>-policy.toml` (`dev_perf` and `core`). 
+# Shared policy for benchmarks without a dedicated policy.
+
+pr_comment = "on_change"
 
 [functions]
 min_percent_total = 2
+
+[functions.timing]
+judged = false
+min_percent_change = 50
+metrics = ["avg", "total"]
 
 [functions.alloc]
 judged = true
@@ -10,8 +16,9 @@ min_percent_change = 20
 metrics = ["avg", "total"]
 min_calls = 0
 
-[functions.timing]
-judged = false
-min_percent_change = 50
+[functions.icount]
+judged = true
+fail_check = false
+min_percent_change = 3
 metrics = ["avg", "total"]
-min_calls = 10
+min_calls = 1

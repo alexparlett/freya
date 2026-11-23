@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    time::Duration,
+};
 
 use freya::helpers::*;
 use freya_core::{
@@ -110,6 +113,45 @@ fn event_propagate() {
             (7, vec![8, 9])
         ]))
     );
+}
+
+#[test]
+fn preventing_capture_pointer_up_preserves_other_capture_handlers() {
+    fn app() -> Element {
+        let mut events = use_consume::<State<Vec<&'static str>>>();
+        rect()
+            .expanded()
+            .on_capture_global_pointer_up(move |event: Event<PointerEventData>| {
+                events.write().push("outer capture");
+                event.prevent_default();
+            })
+            .on_global_pointer_up(move |_| events.write().push("global release"))
+            .child(
+                rect()
+                    .expanded()
+                    .on_capture_global_pointer_up(move |event: Event<PointerEventData>| {
+                        events.write().push("inner capture");
+                        event.prevent_default();
+                    })
+                    .on_touch_end(move |_| events.write().push("touch end"))
+                    .on_press(move |_| events.write().push("press")),
+            )
+            .into()
+    }
+
+    let (mut test, events) = TestingRunner::new(
+        app,
+        (500., 500.).into(),
+        |runner| runner.provide_root_context(|| State::create(Vec::<&str>::new())),
+        1.,
+    );
+    test.sync_and_update();
+    test.press_touch((15., 15.));
+    test.release_touch((15., 15.));
+
+    let mut recorded = events.peek().clone();
+    recorded.sort_unstable();
+    assert_eq!(recorded, ["inner capture", "outer capture"]);
 }
 
 #[test]
@@ -406,13 +448,19 @@ fn text_blocks_events_to_lower_layers() {
 }
 
 #[test]
-fn file_drop_with_multiple_files() {
+fn platform_drop_with_multiple_files() {
     fn app() -> Element {
         let mut state = use_consume::<State<Vec<PathBuf>>>();
         rect()
             .expanded()
             .background((255, 255, 255))
-            .on_file_drop(move |e: Event<FileEventData>| *state.write() = e.file_paths.clone())
+            .on_drag_over(|event: Event<DragEventData>| event.accept(DropAction::Copy))
+            .on_drop(move |event: Event<DragEventData>| {
+                let data = event.data.clone();
+                spawn(async move {
+                    state.set_if_modified(data.read_files().await.unwrap());
+                });
+            })
             .into()
     }
 
@@ -424,12 +472,38 @@ fn file_drop_with_multiple_files() {
     );
     test.sync_and_update();
 
-    test.send_event(PlatformEvent::File {
-        name: FileEventName::FileDrop,
+    let data = DragDataHandle::new(vec![DataFormat::Files]);
+    let decision = DragDecision::default();
+    test.send_event(PlatformEvent::Drag {
+        name: DragEventName::Over,
         cursor: (15., 15.).into(),
-        file_paths: vec![PathBuf::from("first.txt"), PathBuf::from("second.txt")],
+        data: data.clone(),
+        decision: Some(decision.clone()),
+        target: None,
     });
     test.sync_and_update();
+    test.send_event(PlatformEvent::Drag {
+        name: DragEventName::Drop,
+        cursor: (15., 15.).into(),
+        data: data.clone(),
+        decision: None,
+        target: Some(decision.accepted().unwrap().0),
+    });
+    test.sync_and_update();
+    test.poll_n(Duration::ZERO, 2);
+    let requests = data.take_read_requests().unwrap();
+    assert_eq!(requests.len(), 1);
+    for request in requests {
+        assert_eq!(request.format, DataFormat::Files);
+        request
+            .response
+            .send(Ok(DataValue::Files(vec![
+                PathBuf::from("first.txt"),
+                PathBuf::from("second.txt"),
+            ])))
+            .unwrap();
+    }
+    test.poll_n(Duration::ZERO, 2);
 
     assert_eq!(
         *state.peek(),
@@ -508,6 +582,63 @@ fn pointer_leave_with_mouse_move_without_exit() {
 #[test]
 fn pointer_leave_with_mouse_move_and_enter_without_exit() {
     check_pointer_leave_without_exit(true, true);
+}
+
+#[test]
+fn cursor_visibility_property() {
+    fn app() -> Element {
+        let visible = use_consume::<State<Option<bool>>>();
+        rect()
+            .expanded()
+            .child(
+                rect()
+                    .width(Size::px(100.))
+                    .height(Size::px(100.))
+                    .cursor_visible(false)
+                    .child(
+                        rect()
+                            .width(Size::px(50.))
+                            .height(Size::px(50.))
+                            .cursor(CursorIcon::Pointer)
+                            .cursor_visible(*visible.read()),
+                    ),
+            )
+            .into()
+    }
+
+    let (mut test, mut visible) = TestingRunner::new(
+        app,
+        (500., 500.).into(),
+        |runner| runner.provide_root_context(|| State::create(None::<bool>)),
+        1.,
+    );
+    test.sync_and_update();
+    test.move_cursor((25., 25.));
+    test.sync_and_update();
+    assert!(!test.cursor_visible());
+    assert_eq!(test.cursor_icon(), CursorIcon::Pointer);
+
+    visible.set(Some(true));
+    test.sync_and_update();
+    assert!(test.cursor_visible());
+    assert_eq!(test.cursor_icon(), CursorIcon::Pointer);
+
+    visible.set(Some(false));
+    test.sync_and_update();
+    assert!(!test.cursor_visible());
+
+    test.move_cursor((150., 150.));
+    test.sync_and_update();
+    assert!(test.cursor_visible());
+    assert_eq!(test.cursor_icon(), CursorIcon::Default);
+
+    test.move_cursor((25., 25.));
+    test.sync_and_update();
+    assert!(!test.cursor_visible());
+
+    visible.set(None);
+    test.sync_and_update();
+    assert!(!test.cursor_visible());
 }
 
 #[test]
@@ -606,7 +737,10 @@ fn state_made_in_another_scope_lives_with_that_scope() {
     fn app() -> Element {
         let shown = use_consume::<State<bool>>();
         use_provide_context(current_scope_id);
-        rect().expanded().maybe_child(shown().then(|| Child.into_element())).into()
+        rect()
+            .expanded()
+            .maybe_child(shown().then(|| Child.into_element()))
+            .into()
     }
 
     let (mut test, (shown, kept)) = TestingRunner::new(

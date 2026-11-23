@@ -68,13 +68,13 @@ pub struct Attached {
 }
 
 impl KeyExt for Attached {
-    fn write_key(&mut self) -> &mut DiffKey {
+    fn key_mut(&mut self) -> &mut DiffKey {
         &mut self.key
     }
 }
 
 impl ChildrenExt for Attached {
-    fn get_children(&mut self) -> &mut Vec<Element> {
+    fn children_mut(&mut self) -> &mut Vec<Element> {
         &mut self.children
     }
 }
@@ -178,7 +178,7 @@ impl Component for Attached {
         // fact, means there is never a frame positioned without its correction.
         let (left, top) = match inner {
             Some(inner_area) if is_measured => {
-                let root_size = *Platform::get().root_size.peek();
+                let root_size = *Platform::get().current_window().root_size.peek();
                 (
                     left + overflow_offset(
                         inner_area.origin.x + left,

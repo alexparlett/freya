@@ -1,6 +1,6 @@
 [package]
 name = "freya-embed"
-version = "0.5.0-rc.8"
+version.workspace = true
 description = "Freya driven by a host that owns the loop, the GL context and the input, such as a Wayland compositor"
 edition = "2024"
 license = "MIT"

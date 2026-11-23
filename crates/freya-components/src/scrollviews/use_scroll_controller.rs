@@ -1,22 +1,30 @@
-use std::time::Instant;
+use std::time::{
+    Duration,
+    Instant,
+};
 
 use freya_core::prelude::*;
-use torin::{
-    geometry::{
-        Point2D,
-        Size2D,
-        Vector2D,
-    },
-    prelude::{
-        Area,
-        Direction,
-    },
+use torin::prelude::{
+    Area,
+    Direction,
 };
 
 use crate::scrollviews::{
     ItemSize,
-    shared::get_corrected_scroll_position,
+    shared::{
+        get_corrected_scroll_position,
+        is_scrollable,
+    },
 };
+
+/// Logical scroll position in pixels.
+pub type ScrollPoint = euclid::Point2D<f64, ()>;
+
+/// Logical content or viewport size in pixels.
+pub type ScrollSize = euclid::Size2D<f64, ()>;
+
+/// Logical scroll movement or velocity.
+pub type ScrollVector = euclid::Vector2D<f64, ()>;
 
 /// Where along an axis a scroll should land, the beginning or the end.
 #[derive(Default, PartialEq, Eq)]
@@ -28,9 +36,9 @@ pub enum ScrollPosition {
 
 impl ScrollPosition {
     /// Scroll offset in pixels of this position.
-    fn offset(&self) -> i32 {
+    fn offset(&self) -> f64 {
         match self {
-            Self::Start => 0,
+            Self::Start => 0.,
             Self::End => ScrollController::END,
         }
     }
@@ -86,14 +94,43 @@ pub struct ScrollConfig {
 /// }
 /// ```
 ///
-/// For an exact pixel offset use [`scroll_to_y`](ScrollController::scroll_to_y) or
+/// For an exact pixel position use [`scroll_to_y`](ScrollController::scroll_to_y) or
 /// [`scroll_to_x`](ScrollController::scroll_to_x). The current position is available by converting
-/// the controller into a `(i32, i32)` tuple of `(x, y)` pixels.
+/// the controller into a `(f64, f64)` tuple of `(x, y)` pixels, or calling
+/// [`position`](ScrollController::position).
+///
+/// # Animated scrolling
+///
+/// Scrolling to a position is instant by default. To animate, call
+/// [`animate_from`](ScrollController::animate_from) with the current position before setting
+/// the target offset.
+///
+/// ```rust
+/// # use freya::prelude::*;
+/// fn app() -> impl IntoElement {
+///     let mut scroll_controller = use_scroll_controller(ScrollConfig::default);
+///
+///     rect()
+///         .child(
+///             Button::new()
+///                 .on_press(move |_| {
+///                     let current = scroll_controller.position();
+///                     scroll_controller.animate_from(current);
+///                     scroll_controller.scroll_to_y(500.);
+///                 })
+///                 .child("Animate scroll"),
+///         )
+///         .child(
+///             ScrollView::new_controlled(scroll_controller)
+///                 .children((0..100).map(|i| label().key(i).text(format!("Item {i}")))),
+///         )
+/// }
+/// ```
 ///
 /// # Keeping scrollviews in sync
 ///
-/// Because a [`ScrollController`] is a cheap [`Copy`] handle, you can pass the same one to several
-/// scrollviews and they share a single scroll position, moving any of them moves the rest.
+/// Pass the same [`ScrollController`] to several scrollviews to share a single scroll position.
+/// Moving any of them moves the rest.
 ///
 /// ```rust
 /// # use freya::prelude::*;
@@ -136,8 +173,8 @@ pub struct ScrollConfig {
 /// ```
 #[derive(PartialEq, Clone, Copy)]
 pub struct ScrollController {
-    pub(crate) scroll: State<(i32, i32)>,
-    bounds: State<Option<(Size2D, Size2D)>>,
+    pub(crate) scroll: State<(f64, f64)>,
+    pub bounds: State<Option<(ScrollSize, ScrollSize)>>,
     /// The scrollable's viewport rectangle in window space, refreshed on every layout. Lets
     /// [`scroll_to_item`](Self::scroll_to_item) reveal a target from its own measured rectangle
     /// without the caller knowing the viewport.
@@ -147,7 +184,7 @@ pub struct ScrollController {
     pub(crate) task: State<Option<TaskHandle>>,
 }
 
-impl From<ScrollController> for (i32, i32) {
+impl From<ScrollController> for (f64, f64) {
     /// Reads the current `(x, y)` scroll position in pixels.
     fn from(val: ScrollController) -> Self {
         *val.scroll.read()
@@ -156,10 +193,10 @@ impl From<ScrollController> for (i32, i32) {
 
 impl ScrollController {
     /// Offset of an axis scrolled to its end, resolved against the content size on the next layout.
-    const END: i32 = i32::MIN;
+    const END: f64 = f64::INFINITY;
 
     /// Creates a controller starting at the scroll position `(x, y)`.
-    pub fn new(x: i32, y: i32) -> Self {
+    pub fn new(x: f64, y: f64) -> Self {
         Self {
             scroll: State::create((x, y)),
             bounds: State::create(None),
@@ -171,26 +208,29 @@ impl ScrollController {
     }
 
     /// Updates the content and viewport bounds used to clamp scroll positions.
-    ///
-    /// `viewport` is the scrollable's visible frame in window space: the content box is sized to
-    /// the viewport, and its own offset scrolls its children rather than itself.
-    pub(crate) fn apply_layout(&mut self, content_size: Size2D, viewport: Area) {
+    pub fn apply_layout(&mut self, content_size: ScrollSize, viewport_size: ScrollSize) {
         self.bounds
-            .set_if_modified(Some((content_size, viewport.size)));
-        self.viewport.set_if_modified(viewport);
+            .set_if_modified(Some((content_size, viewport_size)));
 
         let (x, y) = *self.scroll.peek();
         self.scroll_to_x(x);
         self.scroll_to_y(y);
     }
 
-    pub(crate) fn position(self) -> Point2D {
-        let (x, y): (i32, i32) = self.into();
-        Point2D::new(x as f32, y as f32)
+    /// Records the scrollable's visible frame in window space, which
+    /// [`scroll_to_item`](Self::scroll_to_item) reveals targets against.
+    pub(crate) fn apply_viewport(&mut self, viewport: Area) {
+        self.viewport.set_if_modified(viewport);
+    }
+
+    /// Reads the current scroll position in pixels.
+    pub fn position(self) -> ScrollPoint {
+        let (x, y) = self.into();
+        ScrollPoint::new(x, y)
     }
 
     /// Scrolls the horizontal axis to `to` pixels. Returns whether the position actually changed.
-    pub fn scroll_to_x(&mut self, to: i32) -> bool {
+    pub fn scroll_to_x(&mut self, to: f64) -> bool {
         let to = self.bounded_position(to, Direction::Horizontal);
         let changed = self.scroll.peek().0 != to;
         if changed {
@@ -200,7 +240,7 @@ impl ScrollController {
     }
 
     /// Scrolls the vertical axis to `to` pixels. Returns whether the position actually changed.
-    pub fn scroll_to_y(&mut self, to: i32) -> bool {
+    pub fn scroll_to_y(&mut self, to: f64) -> bool {
         let to = self.bounded_position(to, Direction::Vertical);
         let changed = self.scroll.peek().1 != to;
         if changed {
@@ -209,7 +249,7 @@ impl ScrollController {
         changed
     }
 
-    fn bounded_position(&self, position: i32, direction: Direction) -> i32 {
+    fn bounded_position(&self, position: f64, direction: Direction) -> f64 {
         let Some((content_size, viewport_size)) = *self.bounds.peek() else {
             return position;
         };
@@ -218,7 +258,7 @@ impl ScrollController {
             Direction::Horizontal => (content_size.width, viewport_size.width),
             Direction::Vertical => (content_size.height, viewport_size.height),
         };
-        get_corrected_scroll_position(content_size, viewport_size, position as f32) as i32
+        get_corrected_scroll_position(content_size, viewport_size, position)
     }
 
     /// Scrolls `scroll_direction` to `scroll_position`.
@@ -231,7 +271,7 @@ impl ScrollController {
     }
 
     /// The content and viewport extents along `direction`, as last laid out.
-    fn extents(bounds: Option<(Size2D, Size2D)>, direction: Direction) -> (f32, f32) {
+    fn extents(bounds: Option<(ScrollSize, ScrollSize)>, direction: Direction) -> (f64, f64) {
         let Some((content_size, viewport_size)) = bounds else {
             return (0., 0.);
         };
@@ -242,61 +282,44 @@ impl ScrollController {
     }
 
     /// Whether the scrollable overflows its viewport along `direction`, i.e. there is content to
-    /// scroll to on that axis. Reads the content size and viewport the scrollable last laid out
-    /// and subscribes the caller, so a sibling can reactively show or hide a scroll affordance as
-    /// the area's content grows and shrinks. Unmeasured (zero-viewport) reads as not scrollable.
+    /// scroll to on that axis. Subscribes the caller, so a sibling can reactively show or hide a
+    /// scroll affordance as the content grows and shrinks. Unmeasured reads as not scrollable.
     pub fn is_scrollable(&self, direction: Direction) -> bool {
         let (content, viewport) = Self::extents(*self.bounds.read(), direction);
-        crate::scrollviews::shared::is_scrollable(content, viewport)
+        is_scrollable(content, viewport)
     }
 
     /// Whether `direction` is scrolled to its end, within a pixel.
     ///
-    /// The predicate a **stick-to-the-end** surface is built on, such as a chat transcript or a log tail:
-    /// follow the content while the reader is at the end, and stop the moment they scroll away
-    /// from it.
+    /// The predicate a stick-to-the-end surface is built on, such as a chat transcript or a log
+    /// tail: follow the content while the reader is at the end, and stop once they scroll away.
     ///
-    /// **Peeks, like [`scroll_to_item`](Self::scroll_to_item), and for a sharper reason than
-    /// looping.** A follower asks this to decide whether to keep following, and the two things it
-    /// compares move for two different reasons: the reader scrolls, and the content grows under
-    /// them. Subscribing would answer "not at the end" the instant the content outgrew the
-    /// viewport, before the follower had scrolled, and a follower that read it reactively would
-    /// conclude the reader had scrolled away and stop, on the very first message too long to fit.
-    /// So the caller chooses what to re-ask on, and the honest trigger is the **scroll position**
-    /// (`(i32, i32)::from(controller)`), which only the reader and the follower move.
+    /// Peeks rather than reads: the content grows under the reader too, and subscribing would
+    /// answer "not at the end" the moment the content outgrew the viewport, before a follower had
+    /// scrolled. Re-ask on the scroll position, which only the reader and the follower move.
     ///
-    /// Content that does not overflow is **at** its end: there is nowhere else to be, and a
-    /// follower gated on this must keep following as the first lines arrive.
+    /// Content that does not overflow is at its end.
     pub fn is_at_end(&self, direction: Direction) -> bool {
         let (content, viewport) = Self::extents(*self.bounds.peek(), direction);
-        if !crate::scrollviews::shared::is_scrollable(content, viewport) {
+        if !is_scrollable(content, viewport) {
             return true;
         }
         let (x, y) = *self.scroll.peek();
         let position = match direction {
             Direction::Horizontal => x,
             Direction::Vertical => y,
-        } as f32;
-        // Bounded on every layout, so once there are bounds to compare against the stored
-        // position is already within them.
-        // The scroll position is negative-going: the content is offset up by how far down the
-        // reader is, so the end is where that offset covers everything the viewport does not.
-        (position.abs() + viewport) >= content - 1.0
+        };
+        position + viewport >= content - 1.0
     }
 
     /// Scrolls the minimum amount needed to bring `item` fully into view, on whichever axes it
     /// overflows the viewport. `item` is the target's own measured window-space rectangle, e.g.
-    /// straight from an [`on_sized`](freya_core::prelude::EventHandlersExt::on_sized)
-    /// [`Area`](torin::prelude::Area), so the caller never has to know the viewport or scroll
-    /// position. A no-op once the item is already visible, so it is safe to call every render (an
-    /// item larger than the viewport aligns to its start and stops, rather than oscillating).
+    /// from an [`on_sized`](freya_core::prelude::EventHandlersExt::on_sized) area, so the caller
+    /// never has to know the viewport or scroll position. A no-op once the item is visible, so it
+    /// is safe to call every render.
     ///
-    /// Jumps straight there, freezing any smooth scroll in flight first: the item's rectangle
-    /// was measured where the content is drawn, which trails the target while an animation runs.
-    /// See [`animate_to_item`](Self::animate_to_item) for a smooth reveal.
-    ///
-    /// Peeks rather than reads: it is imperative, and reading inside a reactive effect would
-    /// subscribe that effect to the viewport and loop it against its own scroll write.
+    /// Jumps straight there, freezing any smooth scroll in flight first, see
+    /// [`animate_to_item`](Self::animate_to_item) for a smooth reveal.
     pub fn scroll_to_item(&mut self, item: impl Into<Area>) {
         self.reveal_item(item.into(), false);
     }
@@ -307,63 +330,48 @@ impl ScrollController {
         self.reveal_item(item.into(), true);
     }
 
-    /// [`scroll_to_item`](Self::scroll_to_item) for a target that has no measured rectangle: scrolls
-    /// the minimum amount needed to bring the span `[offset, offset + size]` of the content into view
+    /// [`scroll_to_item`](Self::scroll_to_item) for a target with no measured rectangle, such as a
+    /// row a [`VirtualScrollView`](crate::scrollviews::VirtualScrollView) has not built: scrolls the
+    /// minimum amount needed to bring the span `[offset, offset + size]` of the content into view
     /// along `direction`.
     ///
-    /// This is the [`VirtualScrollView`](crate::scrollviews::VirtualScrollView) half of the pair. A
-    /// virtualized view only builds the items inside its viewport, so the row a caller wants to
-    /// reveal usually does not exist yet and can report no [`Area`] to reveal against. What the
-    /// caller does know is where the row sits in the content, which
-    /// [`scroll_to_index`](Self::scroll_to_index) works out from an [`ItemSize`]. Everything else,
-    /// the viewport and the current position, is this controller's own, exactly as it is for
-    /// `scroll_to_item`.
-    ///
-    /// A no-op once the span is already visible, so it is safe to call every render.
-    ///
-    /// **Imperative, so it is only meaningful once the scrollable has been laid out**: before the
-    /// first layout there is no viewport and no content extent to reveal against, and the call does
-    /// nothing. Reveal from a gesture, or from an effect that runs once the target could have been
-    /// drawn. A caller that must move the view on the frame it mounts wants
-    /// [`scroll_to`](Self::scroll_to), which is resolved against the content on the next layout.
-    ///
-    /// The content spans `0..content` along the axis and the position is negative-going, so the
-    /// visible span of the content starts at `-position`. Everything is peeked rather than read,
-    /// for [`scroll_to_item`](Self::scroll_to_item)'s reason.
-    pub fn scroll_to_offset(&mut self, offset: f32, size: f32, direction: Direction) {
+    /// Does nothing before the scrollable has been laid out. A caller that must move the view on
+    /// the frame it mounts wants [`scroll_to`](Self::scroll_to).
+    pub fn scroll_to_offset(&mut self, offset: f64, size: f64, direction: Direction) {
         self.reveal_offset(offset, size, direction, false);
     }
 
     /// [`scroll_to_offset`](Self::scroll_to_offset), moving there with the same smooth scroll the
     /// wheel and the arrow keys use.
-    pub fn animate_to_offset(&mut self, offset: f32, size: f32, direction: Direction) {
+    pub fn animate_to_offset(&mut self, offset: f64, size: f64, direction: Direction) {
         self.reveal_offset(offset, size, direction, true);
     }
 
     /// [`scroll_to_offset`](Self::scroll_to_offset) for the item at `index` of a
     /// [`VirtualScrollView`](crate::scrollviews::VirtualScrollView) sized by `item_size`.
-    ///
-    /// With [`ItemSize::Dynamic`] the offset is summed from the sizes before `index`, while the
-    /// view extrapolates its total size from the items it has measured, so near the end of a list
-    /// of uneven items the two can disagree by the error in that estimate.
     pub fn scroll_to_index(&mut self, index: usize, item_size: &ItemSize, direction: Direction) {
-        self.scroll_to_offset(item_size.offset_of(index), item_size.at(index), direction);
+        self.scroll_to_offset(
+            item_size.offset_of(index),
+            item_size.at(index) as f64,
+            direction,
+        );
     }
 
     /// Where the content is drawn right now: the animated position while a smooth scroll runs,
     /// the target otherwise.
-    fn drawn_position(&self) -> Point2D {
+    fn drawn_position(&self) -> ScrollPoint {
         if self.task.peek().is_some() {
-            self.damp.peek().position
+            self.damp.peek().absolute_position()
         } else {
             let (x, y) = *self.scroll.peek();
-            Point2D::new(x as f32, y as f32)
+            ScrollPoint::new(x, y)
         }
     }
 
-    /// Moves the drawn position by `delta`, smoothly or at once.
-    fn reveal_by(&mut self, delta: Vector2D, animate: bool) {
-        if delta == Vector2D::zero() {
+    /// Moves the content by `delta`, smoothly or at once. A positive delta moves the content
+    /// towards the end of the viewport, so the scroll position goes down by it.
+    fn reveal_by(&mut self, delta: ScrollVector, animate: bool) {
+        if delta == ScrollVector::zero() {
             return;
         }
         let from = self.drawn_position();
@@ -373,20 +381,21 @@ impl ScrollController {
             self.stop();
         }
         if delta.x != 0.0 {
-            self.scroll_to_x((from.x + delta.x).round() as i32);
+            self.scroll_to_x(from.x - delta.x);
         }
         if delta.y != 0.0 {
-            self.scroll_to_y((from.y + delta.y).round() as i32);
+            self.scroll_to_y(from.y - delta.y);
         }
     }
 
     fn reveal_item(&mut self, item: Area, animate: bool) {
         let viewport = *self.viewport.peek();
-        // Not laid out yet: nothing meaningful to reveal against.
         if viewport.width() <= 0.0 || viewport.height() <= 0.0 {
             return;
         }
-        let delta = Vector2D::new(
+        let item = item.to_f64();
+        let viewport = viewport.to_f64();
+        let delta = ScrollVector::new(
             reveal_delta(
                 item.min_x(),
                 item.max_x(),
@@ -403,7 +412,7 @@ impl ScrollController {
         self.reveal_by(delta, animate);
     }
 
-    fn reveal_offset(&mut self, offset: f32, size: f32, direction: Direction, animate: bool) {
+    fn reveal_offset(&mut self, offset: f64, size: f64, direction: Direction, animate: bool) {
         let (content, viewport) = Self::extents(*self.bounds.peek(), direction);
         if viewport <= 0.0 || content <= 0.0 {
             return;
@@ -413,32 +422,29 @@ impl ScrollController {
             Direction::Horizontal => drawn.x,
             Direction::Vertical => drawn.y,
         };
-        let delta = reveal_delta(offset, offset + size, -position, -position + viewport);
+        let delta = reveal_delta(offset, offset + size, position, position + viewport);
         self.reveal_by(
             match direction {
-                Direction::Horizontal => Vector2D::new(delta, 0.0),
-                Direction::Vertical => Vector2D::new(0.0, delta),
+                Direction::Horizontal => ScrollVector::new(delta, 0.0),
+                Direction::Vertical => ScrollVector::new(0.0, delta),
             },
             animate,
         );
     }
 }
 
-/// The signed distance to add to the scroll offset on one axis to reveal `[item_min, item_max]`
-/// within `[vp_min, vp_max]`. Only a *clipped* item moves: if the item sits anywhere inside the
-/// visible span (hugging the start, hugging the end, or covering the whole viewport) it's a no-op.
-/// A clipped item is pulled in by the minimum amount (aligning the offending edge). The covering
-/// case (item wider than the viewport, spanning it) is caught first, so an over-large item settles
-/// once its edge is reached instead of oscillating start↔end.
-fn reveal_delta(item_min: f32, item_max: f32, vp_min: f32, vp_max: f32) -> f32 {
+/// The signed distance to move the content along one axis to reveal `[item_min, item_max]`
+/// within `[vp_min, vp_max]`. Only a clipped item moves, by the minimum amount. An item that
+/// already covers the viewport is caught first, so it settles instead of oscillating.
+fn reveal_delta(item_min: f64, item_max: f64, vp_min: f64, vp_max: f64) -> f64 {
     if item_min <= vp_min && item_max >= vp_max {
-        0.0 // item already covers the viewport, visible
+        0.0
     } else if item_min < vp_min {
-        vp_min - item_min // clipped at the start edge → pull it in
+        vp_min - item_min
     } else if item_max > vp_max {
-        vp_max - item_max // clipped at the end edge → pull it in
+        vp_max - item_max
     } else {
-        0.0 // fully inside the viewport
+        0.0
     }
 }
 
@@ -455,27 +461,38 @@ pub fn use_scroll_controller(config: impl FnOnce() -> ScrollConfig) -> ScrollCon
 }
 
 /// Distance under which the animation is close enough to snap, in pixels.
-const SETTLE_DISTANCE: f32 = 0.5;
+const SETTLE_DISTANCE: f64 = 0.5;
+
 /// Speed under which the animation is slow enough to stop, in pixels per second.
-const SETTLE_SPEED: f32 = 20.0;
+const SETTLE_SPEED: f64 = 20.0;
 
 /// Slowest drag release speed that still starts a fling, in pixels per second.
-const FLING_MIN_SPEED: f32 = 50.0;
+const FLING_MIN_SPEED: f64 = 50.0;
+
+/// Fastest drag release speed, in pixels per second.
+const FLING_MAX_SPEED: f64 = 8000.0;
+
+/// Minimum sample interval for touch events delivered together.
+/// 120 is rather a workaround right now, its requires an integration that winit doesnt expose yet.
+const DRAG_MIN_SAMPLE_TIME: f64 = 1.0 / 120.0;
+
+/// Maximum time since the last drag movement that still allows a fling.
+const FLING_RELEASE_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// Scrolling feel of a [`TargetPlatform`].
 pub(crate) trait ScrollFeel {
     /// Seconds wheel and keyboard scrolls take to reach their destination.
-    fn scroll_smoothing_time(&self) -> f32;
+    fn scroll_smoothing_time(&self) -> f64;
     /// Seconds a fling takes to stop, which also scales how far it travels.
-    fn scroll_fling_time(&self) -> f32;
+    fn scroll_fling_time(&self) -> f64;
 }
 
 impl ScrollFeel for TargetPlatform {
-    fn scroll_smoothing_time(&self) -> f32 {
+    fn scroll_smoothing_time(&self) -> f64 {
         if self.is_mobile() { 0.1 } else { 0.06 }
     }
 
-    fn scroll_fling_time(&self) -> f32 {
+    fn scroll_fling_time(&self) -> f64 {
         if self.is_mobile() { 0.35 } else { 0.5 }
     }
 }
@@ -483,22 +500,29 @@ impl ScrollFeel for TargetPlatform {
 /// Moves a value towards a target with a smooth and continuous animation.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct SmoothDamp {
-    position: Point2D,
-    velocity: Vector2D,
-    smooth_time: f32,
+    origin: ScrollPoint,
+    position: ScrollPoint,
+    velocity: ScrollVector,
+    smooth_time: f64,
 }
 
 impl SmoothDamp {
     pub(crate) fn new() -> Self {
         Self {
-            position: Point2D::zero(),
-            velocity: Vector2D::zero(),
+            origin: ScrollPoint::zero(),
+            position: ScrollPoint::zero(),
+            velocity: ScrollVector::zero(),
             smooth_time: TargetPlatform::Unknown.scroll_smoothing_time(),
         }
     }
 
+    fn absolute_position(&self) -> ScrollPoint {
+        self.origin + self.position.to_vector()
+    }
+
     /// Returns whether it has settled onto `target`.
-    fn advance(&mut self, target: Point2D, elapsed_seconds: f32) -> bool {
+    fn advance(&mut self, target: ScrollPoint, elapsed_seconds: f64) -> bool {
+        let target = (target - self.origin).to_point();
         let omega = 2.0 / self.smooth_time;
         let decay = (-omega * elapsed_seconds).exp();
         let change = self.position - target;
@@ -509,7 +533,7 @@ impl SmoothDamp {
 
         if (target - position).length() < SETTLE_DISTANCE && velocity.length() < SETTLE_SPEED {
             self.position = target;
-            self.velocity = Vector2D::zero();
+            self.velocity = ScrollVector::zero();
             return true;
         }
 
@@ -522,26 +546,29 @@ impl SmoothDamp {
 /// Velocity tracked while the content is dragged, to fling with on release.
 #[derive(Clone, Copy)]
 pub(crate) struct Drag {
-    velocity: Vector2D,
+    velocity: ScrollVector,
     last_move: Instant,
 }
 
 impl Default for Drag {
     fn default() -> Self {
         Self {
-            velocity: Vector2D::zero(),
+            velocity: ScrollVector::zero(),
             last_move: Instant::now(),
         }
     }
 }
 
 impl Drag {
-    fn track(&mut self, delta: Vector2D) {
+    fn track(&mut self, delta: ScrollVector) {
         let now = Instant::now();
-        let elapsed_seconds = now.duration_since(self.last_move).as_secs_f32();
-        if elapsed_seconds > 0.0 {
-            self.velocity = self.velocity.lerp(-delta / elapsed_seconds, 0.5);
-        }
+        let elapsed_seconds = now
+            .duration_since(self.last_move)
+            .as_secs_f64()
+            .max(DRAG_MIN_SAMPLE_TIME);
+
+        let velocity = (delta / elapsed_seconds).with_max_length(FLING_MAX_SPEED);
+        self.velocity = self.velocity.lerp(velocity, 0.5);
         self.last_move = now;
     }
 }
@@ -549,29 +576,20 @@ impl Drag {
 /// Follows the target held by a [`ScrollController`].
 impl ScrollController {
     /// Position to render, the animated one while a scroll animation is running.
-    pub fn animated_position(&self, target: Point2D) -> Point2D {
+    pub fn animated_position(&self, target: ScrollPoint) -> ScrollPoint {
         if self.task.read().is_some() {
-            self.damp.read().position
+            self.damp.read().absolute_position()
         } else {
             target
         }
     }
 
     /// Chases the controller position from `current`, keeping the current velocity.
-    pub fn animate_from(&mut self, current: Point2D) {
+    pub fn animate_from(&mut self, current: ScrollPoint) {
         self.start(current, None, TargetPlatform::get().scroll_smoothing_time());
     }
 
-    /// Like [`Self::animate_from`] but launched at `velocity` and slower to stop.
-    fn fling_from(&mut self, current: Point2D, velocity: Vector2D) {
-        self.start(
-            current,
-            Some(velocity),
-            TargetPlatform::get().scroll_fling_time(),
-        );
-    }
-
-    fn start(&mut self, current: Point2D, velocity: Option<Vector2D>, smooth_time: f32) {
+    fn start(&mut self, current: ScrollPoint, velocity: Option<ScrollVector>, smooth_time: f64) {
         let is_animating = self.task.peek().is_some();
         {
             let mut damp = self.damp.write();
@@ -580,7 +598,8 @@ impl ScrollController {
                 damp.velocity = velocity;
             }
             if !is_animating {
-                damp.position = current;
+                damp.origin = current;
+                damp.position = ScrollPoint::zero();
             }
         }
         if is_animating {
@@ -588,14 +607,14 @@ impl ScrollController {
         }
 
         let ticker = RenderingTicker::get();
-        let platform = Platform::get();
+        let platform = Platform::get().current_window();
         let animation_clock = AnimationClock::get();
         let scroll_controller = *self;
         let mut damp = self.damp;
         let mut task = self.task;
 
         let animation_task = spawn(async move {
-            platform.send(UserEvent::RequestRedraw);
+            platform.request_redraw();
             let mut previous_frame = Instant::now();
 
             loop {
@@ -603,7 +622,7 @@ impl ScrollController {
 
                 let elapsed_seconds = animation_clock
                     .correct_elapsed_duration(previous_frame.elapsed())
-                    .as_secs_f32();
+                    .as_secs_f64();
                 previous_frame = Instant::now();
 
                 let target = scroll_controller.position();
@@ -611,12 +630,39 @@ impl ScrollController {
                     break;
                 }
 
-                platform.send(UserEvent::RequestRedraw);
+                platform.request_redraw();
             }
 
             task.write().take();
         });
         task.write().replace(animation_task);
+    }
+
+    /// Returns whether the gesture ended or was cancelled, so callers skip applying the scroll delta.
+    pub(crate) fn scroll_gesture_phase(&mut self, phase: TouchPhase, delta: ScrollVector) -> bool {
+        match phase {
+            TouchPhase::Started => {
+                self.stop();
+                self.drag.set(Drag::default());
+            }
+            TouchPhase::Moved => self.drag.write().track(-delta),
+            TouchPhase::Ended => {
+                let bounds = *self.bounds.peek();
+                if self.drag.peek().last_move.elapsed() < FLING_RELEASE_TIMEOUT
+                    && let Some((content, viewport)) = bounds
+                {
+                    self.release_drag(self.animated_position(self.position()), content, viewport);
+                }
+                self.drag.set(Drag::default());
+                return true;
+            }
+            TouchPhase::Cancelled => {
+                self.stop();
+                self.drag.set(Drag::default());
+                return true;
+            }
+        }
+        false
     }
 
     /// Freezes the animation and starts a drag from the momentum it caught.
@@ -628,14 +674,14 @@ impl ScrollController {
         });
     }
 
-    /// Feeds a drag movement into the tracked velocity.
-    pub fn drag(&mut self, delta: Vector2D) {
+    /// Tracks a drag delta in scroll coordinates, positive toward the end.
+    pub fn drag(&mut self, delta: ScrollVector) {
         self.stop();
         self.drag.write().track(delta);
     }
 
     /// Ends a drag, flinging when it was fast enough to be a flick.
-    pub fn release_drag(&mut self, from: Point2D, content: Size2D, viewport: Size2D) {
+    pub fn release_drag(&mut self, from: ScrollPoint, content: ScrollSize, viewport: ScrollSize) {
         let velocity = self.drag.peek().velocity;
         if velocity.length() < FLING_MIN_SPEED {
             return;
@@ -645,24 +691,32 @@ impl ScrollController {
         let target_x = get_corrected_scroll_position(content.width, viewport.width, projected.x);
         let target_y = get_corrected_scroll_position(content.height, viewport.height, projected.y);
 
-        self.fling_from(from, velocity);
-        self.scroll_to_x(target_x as i32);
-        self.scroll_to_y(target_y as i32);
+        self.start(
+            from,
+            Some(velocity),
+            TargetPlatform::get().scroll_fling_time(),
+        );
+        self.scroll_to_x(target_x);
+        self.scroll_to_y(target_y);
     }
 
     /// Freezes the scroll where it is, returning the velocity it was moving at.
-    pub fn stop(&mut self) -> Vector2D {
-        let task = self.task.write().take();
-        if let Some(task) = task {
-            task.cancel();
+    pub fn stop(&mut self) -> ScrollVector {
+        if self.task.peek().is_some() {
+            let task = self.task.write().take();
+            if let Some(task) = task {
+                task.cancel();
+            }
 
-            let position = self.damp.peek().position.to_i32();
+            let position = self.damp.peek().absolute_position();
             self.scroll_to_x(position.x);
             self.scroll_to_y(position.y);
         }
 
         let velocity = self.damp.peek().velocity;
-        self.damp.write().velocity = Vector2D::zero();
+        if velocity != ScrollVector::zero() {
+            self.damp.write().velocity = ScrollVector::zero();
+        }
         velocity
     }
 }

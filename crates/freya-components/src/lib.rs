@@ -8,7 +8,6 @@ pub mod button;
 pub mod cache;
 #[cfg(feature = "calendar")]
 pub mod calendar;
-pub mod canvas;
 pub mod card;
 pub mod checkbox;
 pub mod chip;
@@ -30,6 +29,7 @@ pub mod lazy;
 pub mod loader;
 pub mod menu;
 pub mod overflowed_content;
+pub mod platform_drag;
 pub mod popup;
 pub mod portal;
 pub mod progressbar;

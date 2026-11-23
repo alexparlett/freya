@@ -1,17 +1,19 @@
 use std::{
     borrow::Cow,
     fmt,
-    pin::Pin,
-    task::Waker,
+    io,
+    rc::Rc,
     time::Instant,
 };
 
 #[cfg(feature = "accessibility")]
-use accesskit_winit::WindowEvent as AccessibilityWindowEvent;
+use accesskit_xplat::WindowEvent as AccessibilityWindowEvent;
+use freya_clipboard::prelude::ClipboardError;
 use freya_components::cache::AssetCacher;
 use freya_core::{
     integration::*,
     metrics::Metrics,
+    prelude::GlobalTasks,
 };
 use freya_engine::prelude::{
     FontCollection,
@@ -20,19 +22,10 @@ use freya_engine::prelude::{
     TypefaceFontProvider,
     register_font_typeface,
 };
-use futures_lite::future::FutureExt as _;
-use futures_util::{
-    FutureExt as _,
-    StreamExt,
-    select,
-};
-use ragnarok::EventsExecutorRunner;
+use futures_channel::oneshot;
 use rustc_hash::FxHashMap;
-use torin::prelude::{
-    CursorPoint,
-    Size2D,
-};
-#[cfg(all(feature = "tray", not(target_os = "linux")))]
+use torin::prelude::CursorPoint;
+#[cfg(feature = "tray")]
 use tray_icon::TrayIcon;
 #[cfg(feature = "accessibility")]
 use winit::dpi::{
@@ -42,15 +35,20 @@ use winit::dpi::{
 use winit::{
     application::ApplicationHandler,
     event::{
+        ButtonSource,
         ElementState,
         Ime,
         MouseScrollDelta,
-        Touch,
+        PointerKind,
+        PointerSource,
         TouchPhase,
         WindowEvent,
     },
     event_loop::{
         ActiveEventLoop,
+        AsyncRequestSerial,
+        ControlFlow,
+        DndAction,
         EventLoopProxy,
     },
     window::{
@@ -63,20 +61,29 @@ use winit::{
 use crate::integration::is_ime_role;
 use crate::{
     accessibility::AccessibilityTask,
+    clipboard::PendingClipboardRead,
     config::{
         CloseDecision,
         WindowConfig,
+    },
+    data_transfer::{
+        DataFormatExt,
+        TransferDataExt,
     },
     drivers::{
         GraphicsContext,
         GraphicsDriver,
     },
+    platform_drag::IncomingDrag,
     plugins::{
         PluginEvent,
         PluginHandle,
         PluginsManager,
     },
-    window::AppWindow,
+    window::{
+        AppWindow,
+        frame_interval,
+    },
     winit_mappings::{
         self,
         map_winit_mouse_button,
@@ -85,6 +92,30 @@ use crate::{
     },
 };
 
+#[derive(Clone)]
+pub struct RendererSender {
+    proxy: EventLoopProxy,
+    sender: std::sync::mpsc::Sender<RendererMessage>,
+}
+
+impl RendererSender {
+    pub(crate) fn new(
+        proxy: EventLoopProxy,
+        sender: std::sync::mpsc::Sender<RendererMessage>,
+    ) -> Self {
+        Self { proxy, sender }
+    }
+
+    pub fn send_message(
+        &self,
+        message: RendererMessage,
+    ) -> Result<(), std::sync::mpsc::SendError<RendererMessage>> {
+        self.sender.send(message)?;
+        self.proxy.wake_up();
+        Ok(())
+    }
+}
+
 pub struct WinitRenderer {
     pub windows_configs: Vec<WindowConfig>,
     #[cfg(feature = "tray")]
@@ -92,7 +123,7 @@ pub struct WinitRenderer {
         Option<crate::config::TrayIconGetter>,
         Option<crate::config::TrayHandler>,
     ),
-    #[cfg(all(feature = "tray", not(target_os = "linux")))]
+    #[cfg(feature = "tray")]
     pub(crate) tray_icon: Option<TrayIcon>,
     #[cfg(feature = "menu")]
     pub(crate) menu: (
@@ -105,28 +136,42 @@ pub struct WinitRenderer {
     pub resumed: bool,
     pub windows: FxHashMap<WindowId, AppWindow>,
     pub global_contexts: GlobalContexts,
-    pub proxy: EventLoopProxy<NativeEvent>,
+    pub proxy: RendererSender,
+    pub(crate) messages: std::sync::mpsc::Receiver<RendererMessage>,
+    pub(crate) clipboard_reads: FxHashMap<AsyncRequestSerial, PendingClipboardRead>,
     pub plugins: PluginsManager,
     pub fallback_fonts: Vec<Cow<'static, str>>,
     pub font_provider: TypefaceFontProvider,
     pub font_manager: FontMgr,
     pub font_collection: FontCollection,
-    pub futures: Vec<Pin<Box<dyn std::future::Future<Output = ()>>>>,
-    pub waker: Waker,
     pub exit_on_close: bool,
     pub gpu_resource_cache_limit: usize,
     pub graphics_context: GraphicsContext,
 }
 
+impl Drop for WinitRenderer {
+    fn drop(&mut self) {
+        let tasks = self.global_contexts.get_context::<GlobalTasks>();
+        tasks.clear();
+        for window_id in self.windows.keys() {
+            Platform::get().unregister_window(window_id.into_raw() as u64);
+        }
+        self.windows.clear();
+        // Cancel cleanup tasks spawned during window teardown.
+        tasks.clear();
+        self.global_contexts.unregister();
+    }
+}
+
 pub struct RendererContext<'a> {
     pub windows: &'a mut FxHashMap<WindowId, AppWindow>,
     pub global_contexts: &'a GlobalContexts,
-    pub proxy: &'a mut EventLoopProxy<NativeEvent>,
+    pub proxy: &'a mut RendererSender,
     pub plugins: &'a mut PluginsManager,
     pub fallback_fonts: &'a mut Vec<Cow<'static, str>>,
     pub font_manager: &'a mut FontMgr,
     pub font_collection: &'a mut FontCollection,
-    pub active_event_loop: &'a ActiveEventLoop,
+    pub active_event_loop: &'a dyn ActiveEventLoop,
     pub gpu_resource_cache_limit: usize,
     pub graphics_context: &'a mut GraphicsContext,
 }
@@ -143,15 +188,14 @@ impl RendererContext<'_> {
             self.fallback_fonts,
             self.gpu_resource_cache_limit,
             self.graphics_context,
-            self.global_contexts,
         );
 
         let window_id = app_window.window.id();
 
         self.proxy
-            .send_event(NativeEvent::Window(NativeWindowEvent {
+            .send_message(RendererMessage::Window(RendererWindowMessage {
                 window_id,
-                action: NativeWindowEventAction::PollRunner,
+                payload: RendererWindowPayload::PollRunner,
             }))
             .ok();
 
@@ -195,34 +239,33 @@ impl RendererContext<'_> {
     }
 }
 
-/// Queue [`NativeEvent`]s for windows on the event loop. The two required methods are
-/// the primitives (target resolution and the queue itself); the provided methods are
-/// the window-targeted requests built on top, shared by every implementor. Queued
-/// events run after the current handler returns.
-pub trait NativeEventExt {
+/// Queue [`RendererMessage`]s for windows on the event loop. The two required methods are the
+/// primitives (target resolution and the queue itself); the provided methods are the
+/// window-targeted requests built on top. Queued messages run after the current handler returns.
+pub trait RendererMessageExt {
     /// The window a `None` target resolves to: the focused window, falling back to any.
     fn resolve_window_id(&self, window_id: Option<WindowId>) -> Option<WindowId>;
 
-    /// Queue one event on the event loop.
-    fn send_native_event(&mut self, event: NativeEvent);
+    /// Queue one message on the event loop.
+    fn send_renderer_message(&mut self, message: RendererMessage);
 
     /// Close a window through the same path as an OS-triggered close: the window's
     /// [`on_close`](crate::config::WindowConfig::with_on_close) hook keeps its veto.
     /// `None` targets the focused window (falling back to any).
     fn request_close_window(&mut self, window_id: Option<WindowId>) {
         if let Some(window_id) = self.resolve_window_id(window_id) {
-            self.send_native_event(NativeEvent::Window(NativeWindowEvent {
+            self.send_renderer_message(RendererMessage::Window(RendererWindowMessage {
                 window_id,
-                action: NativeWindowEventAction::RequestClose,
+                payload: RendererWindowPayload::RequestClose,
             }));
         }
     }
 
-    /// Send a synthetic key press (a key down followed by a key up) through a window's
-    /// normal keyboard pipeline, as if the user typed it. `None` targets the focused
-    /// window (falling back to any). This backs menubar items whose action belongs to
-    /// the focused text element (an Edit menu's undo / copy / paste), so dispatch
-    /// reuses the same focus and binding resolution as real input.
+    /// Send a synthetic key press (a key down followed by a key up) through a window's normal
+    /// keyboard pipeline, as if the user typed it. `None` targets the focused window (falling
+    /// back to any). This backs menubar items whose action belongs to the focused text element
+    /// (an Edit menu's undo, copy or paste), so dispatch reuses the same focus and binding
+    /// resolution as real input.
     fn send_key_press(
         &mut self,
         window_id: Option<WindowId>,
@@ -234,9 +277,9 @@ pub trait NativeEventExt {
             return;
         };
         for name in [KeyboardEventName::KeyDown, KeyboardEventName::KeyUp] {
-            self.send_native_event(NativeEvent::Window(NativeWindowEvent {
+            self.send_renderer_message(RendererMessage::Window(RendererWindowMessage {
                 window_id,
-                action: NativeWindowEventAction::PlatformEvent(PlatformEvent::Keyboard {
+                payload: RendererWindowPayload::PlatformEvent(PlatformEvent::Keyboard {
                     name,
                     key: key.clone(),
                     code,
@@ -247,7 +290,7 @@ pub trait NativeEventExt {
     }
 }
 
-impl NativeEventExt for RendererContext<'_> {
+impl RendererMessageExt for RendererContext<'_> {
     fn resolve_window_id(&self, window_id: Option<WindowId>) -> Option<WindowId> {
         window_id.or_else(|| {
             self.windows
@@ -258,13 +301,13 @@ impl NativeEventExt for RendererContext<'_> {
         })
     }
 
-    fn send_native_event(&mut self, event: NativeEvent) {
-        self.proxy.send_event(event).ok();
+    fn send_renderer_message(&mut self, message: RendererMessage) {
+        self.proxy.send_message(message).ok();
     }
 }
 
 #[derive(Debug)]
-pub enum NativeWindowEventAction {
+pub enum RendererWindowPayload {
     PollRunner,
 
     #[cfg(feature = "accessibility")]
@@ -272,19 +315,19 @@ pub enum NativeWindowEventAction {
 
     PlatformEvent(PlatformEvent),
 
-    User(UserEvent),
+    Command(WindowCommand),
 
     /// Close the window through the same path as an OS-triggered close: the window's
     /// [`on_close`](crate::config::WindowConfig::with_on_close) hook keeps its veto.
-    /// (The erased `CloseWindow` action force-removes instead.)
+    /// ([`WinitCommand::CloseWindow`] force-removes instead.)
     RequestClose,
 }
 
-/// Proxy wrapper provided to launch tasks so they can post callbacks executed inside the renderer.
+/// Handle for posting renderer callbacks from launch tasks.
 #[derive(Clone)]
-pub struct LaunchProxy(pub EventLoopProxy<NativeEvent>);
+pub struct LaunchHandle(pub RendererSender);
 
-impl LaunchProxy {
+impl LaunchHandle {
     /// Queue a callback to be run on the renderer thread with access to a [`RendererContext`].
     ///
     /// The call dispatches an event to the winit event loop and returns right away. The
@@ -292,8 +335,7 @@ impl LaunchProxy {
     /// through the returned oneshot [`Receiver`](futures_channel::oneshot::Receiver), which
     /// can be `.await`ed or dropped.
     ///
-    /// The callback runs outside any component scope, so you can't call `Platform::get` or
-    /// consume context from inside it. Use the [`RendererContext`] argument instead.
+    /// The callback runs outside a window context. Use explicit window IDs for window APIs.
     pub fn post_callback<F, T: 'static>(&self, f: F) -> futures_channel::oneshot::Receiver<T>
     where
         F: FnOnce(&mut RendererContext) -> T + 'static,
@@ -305,54 +347,48 @@ impl LaunchProxy {
         });
         let _ = self
             .0
-            .send_event(NativeEvent::Generic(NativeGenericEvent::RendererCallback(
-                cb,
+            .send_message(RendererMessage::App(RendererAppMessage::Command(
+                AppCommand::Erased(ErasedCommand(Box::new(WinitCommand::RendererCallback(cb)))),
             )));
         rx
     }
 }
 
-pub type RendererCallback = Box<dyn FnOnce(WindowId, &mut RendererContext) + 'static>;
+pub type RendererCallback = Box<dyn FnOnce(&mut RendererContext) + 'static>;
 
-pub enum NativeWindowErasedEventAction {
+pub enum WinitCommand {
     LaunchWindow {
         window_config: Box<WindowConfig>,
         ack: futures_channel::oneshot::Sender<WindowId>,
     },
     CloseWindow(WindowId),
     RendererCallback(RendererCallback),
+    ReadClipboard {
+        format: DataFormat,
+        response: oneshot::Sender<Result<DataValue, ClipboardError>>,
+    },
+    WriteClipboard {
+        data: TransferData,
+        response: oneshot::Sender<Result<(), ClipboardError>>,
+    },
 }
 
 #[derive(Debug)]
-pub struct NativeWindowEvent {
+pub struct RendererWindowMessage {
     pub window_id: WindowId,
-    pub action: NativeWindowEventAction,
+    pub payload: RendererWindowPayload,
 }
 
-#[cfg(feature = "tray")]
-#[derive(Debug)]
-pub enum NativeTrayEventAction {
-    TrayEvent(tray_icon::TrayIconEvent),
-    MenuEvent(tray_icon::menu::MenuEvent),
-    LaunchWindow(SingleThreadErasedEvent),
-}
-
-#[cfg(feature = "tray")]
-#[derive(Debug)]
-pub struct NativeTrayEvent {
-    pub action: NativeTrayEventAction,
-}
-
-pub enum NativeGenericEvent {
+pub enum RendererAppMessage {
     PollFutures,
-    RendererCallback(Box<dyn FnOnce(&mut RendererContext) + 'static>),
+    Command(AppCommand),
 }
 
-impl fmt::Debug for NativeGenericEvent {
+impl fmt::Debug for RendererAppMessage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            NativeGenericEvent::PollFutures => f.write_str("PollFutures"),
-            NativeGenericEvent::RendererCallback(_) => f.write_str("RendererCallback"),
+            RendererAppMessage::PollFutures => f.write_str("PollFutures"),
+            RendererAppMessage::Command(event) => f.debug_tuple("Command").field(event).finish(),
         }
     }
 }
@@ -360,42 +396,524 @@ impl fmt::Debug for NativeGenericEvent {
 /// # Safety
 /// The values are never sent, received or accessed by other threads other than the main thread.
 /// This is needed to send `Rc<T>` and other non-Send and non-Sync values.
-unsafe impl Send for NativeGenericEvent {}
-unsafe impl Sync for NativeGenericEvent {}
+unsafe impl Send for RendererAppMessage {}
+unsafe impl Sync for RendererAppMessage {}
 
 #[derive(Debug)]
-pub enum NativeEvent {
-    Window(NativeWindowEvent),
+pub enum RendererMessage {
+    Window(RendererWindowMessage),
     #[cfg(feature = "tray")]
-    Tray(NativeTrayEvent),
+    Tray(crate::tray_icon::TrayEvent),
     /// A menubar item was activated (muda's global menu event stream).
     #[cfg(feature = "menu")]
     Menu(muda::MenuEvent),
-    Generic(NativeGenericEvent),
+    App(RendererAppMessage),
     Preferences(mundy::Preferences),
 }
 
 #[cfg(feature = "accessibility")]
-impl From<accesskit_winit::Event> for NativeEvent {
-    fn from(event: accesskit_winit::Event) -> Self {
-        NativeEvent::Window(NativeWindowEvent {
-            window_id: event.window_id,
-            action: NativeWindowEventAction::Accessibility(event.window_event),
-        })
+pub(crate) struct AccessibilityEventHandler {
+    pub(crate) window_id: WindowId,
+    pub(crate) proxy: RendererSender,
+}
+
+#[cfg(feature = "accessibility")]
+impl accesskit_xplat::EventHandler for AccessibilityEventHandler {
+    fn handle_accesskit_event(&self, event: AccessibilityWindowEvent) {
+        let _ = self
+            .proxy
+            .send_message(RendererMessage::Window(RendererWindowMessage {
+                window_id: self.window_id,
+                payload: RendererWindowPayload::Accessibility(event),
+            }));
+    }
+}
+
+impl ApplicationHandler for WinitRenderer {
+    #[cfg(target_os = "android")]
+    fn destroy_surfaces(&mut self, _active_event_loop: &dyn ActiveEventLoop) {
+        for app in self.windows.values_mut() {
+            drop(app.driver.take());
+        }
+    }
+
+    fn can_create_surfaces(&mut self, active_event_loop: &dyn ActiveEventLoop) {
+        if !self.resumed {
+            // The menubar builds on this (main) thread; on macOS it installs into NSApp,
+            // replacing whatever menu winit set up.
+            #[cfg(feature = "menu")]
+            if let Some(menu) = self.menu.0.take() {
+                let menu = (menu)();
+                #[cfg(target_os = "macos")]
+                menu.init_for_nsapp();
+                self.app_menu = Some(menu);
+            }
+
+            #[cfg(feature = "tray")]
+            {
+                if let Some(tray_icon) = self.tray.0.take() {
+                    self.tray_icon = Some((tray_icon)());
+                }
+
+                #[cfg(target_os = "macos")]
+                {
+                    use objc2_core_foundation::CFRunLoop;
+
+                    let rl = CFRunLoop::main().expect("Failed to run CFRunLoop");
+                    CFRunLoop::wake_up(&rl);
+                }
+            }
+
+            for window_config in self.windows_configs.drain(..) {
+                let app_window = AppWindow::new(
+                    window_config,
+                    active_event_loop,
+                    &self.proxy,
+                    &mut self.plugins,
+                    &mut self.font_collection,
+                    &self.font_manager,
+                    &self.fallback_fonts,
+                    self.gpu_resource_cache_limit,
+                    &mut self.graphics_context,
+                );
+
+                self.proxy
+                    .send_message(RendererMessage::Window(RendererWindowMessage {
+                        window_id: app_window.window.id(),
+                        payload: RendererWindowPayload::PollRunner,
+                    }))
+                    .ok();
+
+                self.windows.insert(app_window.window.id(), app_window);
+            }
+            self.resumed = true;
+
+            subscribe_preferences(self.proxy.clone());
+
+            let _ = self
+                .proxy
+                .send_message(RendererMessage::App(RendererAppMessage::PollFutures));
+        } else {
+            let old_windows: Vec<_> = self.windows.drain().collect();
+            for (old_id, mut app_window) in old_windows {
+                #[cfg(target_os = "android")]
+                if app_window.driver.is_some() {
+                    self.windows.insert(old_id, app_window);
+                    continue;
+                }
+
+                let (new_driver, new_window) = GraphicsDriver::new(
+                    active_event_loop,
+                    app_window.window_attributes.clone(),
+                    self.gpu_resource_cache_limit,
+                    app_window.renderer,
+                    &mut self.graphics_context,
+                );
+
+                let new_id = new_window.id();
+                Platform::get().unregister_window(old_id.into_raw() as u64);
+                app_window.platform.id = new_id.into_raw() as u64;
+                app_window.platform.sender = Rc::new({
+                    let proxy = self.proxy.clone();
+                    move |event| {
+                        let _ =
+                            proxy.send_message(RendererMessage::Window(RendererWindowMessage {
+                                window_id: new_id,
+                                payload: RendererWindowPayload::Command(event),
+                            }));
+                    }
+                });
+                app_window
+                    .runner
+                    .provide_root_context(|| CurrentWindowId(app_window.platform.id));
+                Platform::get().register_window(app_window.platform.clone());
+                app_window.driver = Some(new_driver);
+                app_window.window = new_window;
+                self.plugins.send(
+                    PluginEvent::WindowResumed {
+                        window: app_window.window.as_ref(),
+                        tree: &mut app_window.tree,
+                    },
+                    PluginHandle::new(&self.proxy),
+                );
+                app_window.scale_factor_changed();
+
+                self.windows.insert(new_id, app_window);
+
+                self.proxy
+                    .send_message(RendererMessage::Window(RendererWindowMessage {
+                        window_id: new_id,
+                        payload: RendererWindowPayload::PollRunner,
+                    }))
+                    .ok();
+            }
+        }
+    }
+
+    fn proxy_wake_up(&mut self, active_event_loop: &dyn ActiveEventLoop) {
+        while let Ok(message) = self.messages.try_recv() {
+            self.dispatch_message(active_event_loop, message);
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.update_control_flow(event_loop);
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &dyn winit::event_loop::ActiveEventLoop,
+        window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        self.process_window_event(event_loop, window_id, event);
     }
 }
 
 impl WinitRenderer {
-    /// Close `window_id` through the same path as an OS-triggered close: run the
-    /// window's [`on_close`](crate::config::WindowConfig::with_on_close) hook (which may
-    /// veto), remove the window on [`CloseDecision::Close`], and exit the loop when
-    /// nothing keeps the app alive. Shared by `WindowEvent::CloseRequested` and
-    /// [`NativeWindowEventAction::RequestClose`].
-    fn process_close_request(
+    /// Processes buffered input when due.
+    fn process_pending_events(&mut self) {
+        let now = Instant::now();
+        for app in self.windows.values_mut() {
+            if !app
+                .event_buffer
+                .deadline()
+                .is_some_and(|deadline| deadline <= now)
+            {
+                continue;
+            }
+            app.event_buffer.interval = frame_interval(app.window.as_ref());
+            if app.process_buffered_events(
+                &mut self.font_collection,
+                &self.font_manager,
+                &self.fallback_fonts,
+                &mut self.plugins,
+                PluginHandle::new(&self.proxy),
+            ) {
+                app.window.request_redraw();
+            }
+        }
+    }
+
+    /// Processes buffered input, UI updates, and pending platform drag requests.
+    fn process_pending_updates(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.clipboard_reads
+            .retain(|_, pending| !pending.response.is_canceled());
+        self.process_pending_events();
+        for app in self.windows.values_mut() {
+            app.platform_drag.process_pending(event_loop);
+        }
+    }
+
+    fn dispatch_message(
         &mut self,
-        window_id: WindowId,
-        event_loop: &winit::event_loop::ActiveEventLoop,
+        active_event_loop: &dyn winit::event_loop::ActiveEventLoop,
+        message: RendererMessage,
     ) {
+        match message {
+            RendererMessage::App(RendererAppMessage::PollFutures) => {
+                GlobalTasks::get().poll();
+            }
+            RendererMessage::Preferences(prefs) => {
+                for app in self.windows.values_mut() {
+                    app.platform
+                        .accent_color
+                        .set_if_modified(prefs.accent_color);
+                }
+            }
+            #[cfg(feature = "tray")]
+            RendererMessage::Tray(event) => {
+                let renderer_context = RendererContext {
+                    fallback_fonts: &mut self.fallback_fonts,
+                    active_event_loop,
+                    windows: &mut self.windows,
+                    global_contexts: &self.global_contexts,
+                    proxy: &mut self.proxy,
+                    plugins: &mut self.plugins,
+                    font_manager: &mut self.font_manager,
+                    font_collection: &mut self.font_collection,
+                    gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                    graphics_context: &mut self.graphics_context,
+                };
+                if let Some(tray_handler) = &mut self.tray.1 {
+                    (tray_handler)(event, renderer_context);
+                }
+            }
+            #[cfg(feature = "menu")]
+            RendererMessage::Menu(menu_event) => {
+                // Tray menus share muda's global event stream, so with both features on both
+                // handlers see every event and match their own item ids.
+                #[cfg(feature = "tray")]
+                if let Some(tray_handler) = &mut self.tray.1 {
+                    let renderer_context = RendererContext {
+                        fallback_fonts: &mut self.fallback_fonts,
+                        active_event_loop,
+                        windows: &mut self.windows,
+                        global_contexts: &self.global_contexts,
+                        proxy: &mut self.proxy,
+                        plugins: &mut self.plugins,
+                        font_manager: &mut self.font_manager,
+                        font_collection: &mut self.font_collection,
+                        gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                        graphics_context: &mut self.graphics_context,
+                    };
+                    (tray_handler)(
+                        crate::tray_icon::TrayEvent::Menu(menu_event.clone()),
+                        renderer_context,
+                    );
+                }
+                if let Some(menu_handler) = &mut self.menu.1 {
+                    let renderer_context = RendererContext {
+                        fallback_fonts: &mut self.fallback_fonts,
+                        active_event_loop,
+                        windows: &mut self.windows,
+                        global_contexts: &self.global_contexts,
+                        proxy: &mut self.proxy,
+                        plugins: &mut self.plugins,
+                        font_manager: &mut self.font_manager,
+                        font_collection: &mut self.font_collection,
+                        gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                        graphics_context: &mut self.graphics_context,
+                    };
+                    (menu_handler)(menu_event, renderer_context);
+                }
+            }
+            RendererMessage::App(RendererAppMessage::Command(AppCommand::LoadFont {
+                font_name,
+                font_data,
+            })) => {
+                let Some(typeface) = FontMgr::custom_empty()
+                    .unwrap_or_default()
+                    .new_from_data(SkData::new_copy(&font_data), None)
+                else {
+                    tracing::error!("Failed to load font {font_name}.");
+                    return;
+                };
+
+                register_font_typeface(&mut self.font_provider, font_name.as_ref(), typeface);
+                self.font_collection.clear_caches();
+
+                for app in self.windows.values_mut() {
+                    app.process_layout_on_next_render = true;
+                    app.tree.layout.reset();
+                    app.tree.text_cache.reset();
+                    app.window.request_redraw();
+                }
+            }
+            RendererMessage::App(RendererAppMessage::Command(event)) => match event {
+                AppCommand::OpenUrl(url) => {
+                    if let Err(error) = open::that(&url) {
+                        tracing::error!(%error, %url, "Failed to open URL");
+                    }
+                }
+                AppCommand::Exit => active_event_loop.exit(),
+                AppCommand::LoadFont { .. } => unreachable!(),
+                AppCommand::Erased(data) => {
+                    let action = data
+                        .0
+                        .downcast::<WinitCommand>()
+                        .expect("Expected WinitCommand");
+                    match *action {
+                        WinitCommand::ReadClipboard { format, response } => {
+                            let transfer = match active_event_loop.clipboard() {
+                                Ok(Some(transfer)) => transfer,
+                                Ok(None) => {
+                                    let _ = response.send(Err(ClipboardError::UnsupportedFormat));
+                                    return;
+                                }
+                                Err(_) => {
+                                    let _ = response.send(Err(ClipboardError::NotAvailable));
+                                    return;
+                                }
+                            };
+                            if !active_event_loop
+                                .data_transfer(transfer)
+                                .is_ok_and(|data| data.has_type(&format.to_type_hint()))
+                            {
+                                let _ = response.send(Err(ClipboardError::UnsupportedFormat));
+                                return;
+                            }
+                            match active_event_loop
+                                .fetch_data_transfer(transfer, &format.to_type_hint())
+                            {
+                                Ok(serial) => {
+                                    self.clipboard_reads.insert(
+                                        serial,
+                                        PendingClipboardRead {
+                                            transfer,
+                                            format,
+                                            response,
+                                        },
+                                    );
+                                }
+                                Err(_) => {
+                                    let _ = response.send(Err(ClipboardError::FailedToRead));
+                                }
+                            }
+                        }
+                        WinitCommand::WriteClipboard { data, response } => {
+                            let result = data
+                                .into_winit()
+                                .map_err(|_| ClipboardError::FailedToSet)
+                                .and_then(|data| {
+                                    active_event_loop
+                                        .set_clipboard(data)
+                                        .map_err(|_| ClipboardError::FailedToSet)
+                                });
+                            let _ = response.send(result);
+                        }
+                        WinitCommand::LaunchWindow { window_config, ack } => {
+                            let app_window = AppWindow::new(
+                                *window_config,
+                                active_event_loop,
+                                &self.proxy,
+                                &mut self.plugins,
+                                &mut self.font_collection,
+                                &self.font_manager,
+                                &self.fallback_fonts,
+                                self.gpu_resource_cache_limit,
+                                &mut self.graphics_context,
+                            );
+                            let window_id = app_window.window.id();
+                            let _ = self.proxy.send_message(RendererMessage::Window(
+                                RendererWindowMessage {
+                                    window_id,
+                                    payload: RendererWindowPayload::PollRunner,
+                                },
+                            ));
+                            self.windows.insert(window_id, app_window);
+                            let _ = ack.send(window_id);
+                        }
+                        WinitCommand::CloseWindow(window_id) => {
+                            Platform::get().unregister_window(window_id.into_raw() as u64);
+                            if let Some(app) = self.windows.remove(&window_id) {
+                                self.plugins.send(
+                                    PluginEvent::WindowClosed {
+                                        window: app.window.as_ref(),
+                                        tree: &app.tree,
+                                    },
+                                    PluginHandle::new(&self.proxy),
+                                );
+                            }
+                            #[cfg(feature = "tray")]
+                            let has_tray = self.tray.1.is_some();
+                            #[cfg(not(feature = "tray"))]
+                            let has_tray = false;
+                            if self.windows.is_empty() && !has_tray && self.exit_on_close {
+                                active_event_loop.exit();
+                            }
+                        }
+                        WinitCommand::RendererCallback(callback) => {
+                            let mut renderer_context = RendererContext {
+                                fallback_fonts: &mut self.fallback_fonts,
+                                active_event_loop,
+                                windows: &mut self.windows,
+                                proxy: &mut self.proxy,
+                                plugins: &mut self.plugins,
+                                font_manager: &mut self.font_manager,
+                                font_collection: &mut self.font_collection,
+                                gpu_resource_cache_limit: self.gpu_resource_cache_limit,
+                                graphics_context: &mut self.graphics_context,
+                                global_contexts: &self.global_contexts,
+                            };
+                            callback(&mut renderer_context);
+                        }
+                    }
+                }
+            },
+            RendererMessage::Window(RendererWindowMessage { payload, window_id }) => {
+                // The close request needs `&mut self` (it may remove the window), so it is
+                // handled before the per-window borrow below.
+                if matches!(payload, RendererWindowPayload::RequestClose) {
+                    self.process_close_request(window_id, active_event_loop);
+                    return;
+                }
+                if let Some(app) = &mut self.windows.get_mut(&window_id) {
+                    match payload {
+                        RendererWindowPayload::PollRunner => {
+                            if app.poll_runner(&mut self.plugins, PluginHandle::new(&self.proxy)) {
+                                app.window.request_redraw();
+                            }
+                        }
+                        #[cfg(feature = "accessibility")]
+                        RendererWindowPayload::Accessibility(
+                            AccessibilityWindowEvent::AccessibilityDeactivated,
+                        ) => {
+                            app.screen_reader.set(false);
+                        }
+                        #[cfg(feature = "accessibility")]
+                        RendererWindowPayload::Accessibility(
+                            AccessibilityWindowEvent::ActionRequested(request),
+                        ) => {
+                            if app.accessibility.handle_action(
+                                request,
+                                &mut app.tree,
+                                &app.events_sender,
+                            ) {
+                                app.accessibility_tasks_for_next_render |=
+                                    AccessibilityTask::ProcessUpdate { mode: None };
+                                app.window.request_redraw();
+                            }
+                        }
+                        #[cfg(feature = "accessibility")]
+                        RendererWindowPayload::Accessibility(
+                            AccessibilityWindowEvent::InitialTreeRequested,
+                        ) => {
+                            app.accessibility_tasks_for_next_render = AccessibilityTask::Init;
+                            app.window.request_redraw();
+                        }
+                        RendererWindowPayload::Command(command) => match command {
+                            WindowCommand::RequestRedraw => {
+                                app.window.request_redraw();
+                            }
+                            WindowCommand::FocusAccessibilityNode(strategy) => {
+                                let task = match strategy {
+                                    AccessibilityFocusStrategy::Backward(_)
+                                    | AccessibilityFocusStrategy::Forward(_) => {
+                                        AccessibilityTask::ProcessUpdate {
+                                            mode: Some(NavigationMode::Keyboard),
+                                        }
+                                    }
+                                    _ => AccessibilityTask::ProcessUpdate { mode: None },
+                                };
+                                if let AccessibilityFocusStrategy::Node(id) = &strategy {
+                                    app.platform.focused_accessibility_id.set_if_modified(*id);
+                                }
+                                app.tree.accessibility_diff.request_focus(strategy);
+                                app.accessibility_tasks_for_next_render |= task;
+                                app.window.request_redraw();
+                            }
+                            WindowCommand::SetCustomScaleFactor(custom_scale_factor) => {
+                                app.set_custom_scale_factor(custom_scale_factor);
+                            }
+                            WindowCommand::Erased(command) => {
+                                if let Ok(command) = command.0.downcast::<PlatformDragCommand>() {
+                                    app.handle_platform_drag(
+                                        *command,
+                                        active_event_loop,
+                                        &mut self.font_collection,
+                                        &self.font_manager,
+                                        &self.fallback_fonts,
+                                    );
+                                }
+                            }
+                        },
+                        RendererWindowPayload::PlatformEvent(platform_event) => {
+                            app.queue_platform_events(vec![platform_event]);
+                        }
+                        // Intercepted before the per-window borrow above.
+                        RendererWindowPayload::RequestClose => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Close `window_id` through the same path as an OS-triggered close: run the window's
+    /// [`on_close`](crate::config::WindowConfig::with_on_close) hook (which may veto), remove
+    /// the window on [`CloseDecision::Close`], and exit the loop when nothing keeps the app
+    /// alive. Shared by `WindowEvent::CloseRequested` and [`RendererWindowPayload::RequestClose`].
+    fn process_close_request(&mut self, window_id: WindowId, event_loop: &dyn ActiveEventLoop) {
         let mut on_close_hook = self
             .windows
             .get_mut(&window_id)
@@ -426,10 +944,11 @@ impl WinitRenderer {
         }
 
         if matches!(decision, CloseDecision::Close) {
+            Platform::get().unregister_window(window_id.into_raw() as u64);
             if let Some(app) = self.windows.remove(&window_id) {
                 self.plugins.send(
                     PluginEvent::WindowClosed {
-                        window: &app.window,
+                        window: app.window.as_ref(),
                         tree: &app.tree,
                     },
                     PluginHandle::new(&self.proxy),
@@ -437,16 +956,10 @@ impl WinitRenderer {
             }
             let has_windows = !self.windows.is_empty();
 
-            let has_tray = {
-                #[cfg(feature = "tray")]
-                {
-                    self.tray.1.is_some()
-                }
-                #[cfg(not(feature = "tray"))]
-                {
-                    false
-                }
-            };
+            #[cfg(feature = "tray")]
+            let has_tray = self.tray.1.is_some();
+            #[cfg(not(feature = "tray"))]
+            let has_tray = false;
 
             // Only exit when there is no windows and no tray
             if !has_windows && !has_tray && self.exit_on_close {
@@ -454,529 +967,194 @@ impl WinitRenderer {
             }
         }
     }
-}
 
-impl ApplicationHandler<NativeEvent> for WinitRenderer {
-    fn resumed(&mut self, active_event_loop: &winit::event_loop::ActiveEventLoop) {
-        if !self.resumed {
-            // The menubar builds on this (main) thread; on macOS it installs into
-            // NSApp — replacing whatever menu winit set up.
-            #[cfg(feature = "menu")]
-            if let Some(menu) = self.menu.0.take() {
-                let menu = (menu)();
-                #[cfg(target_os = "macos")]
-                menu.init_for_nsapp();
-                self.app_menu = Some(menu);
-            }
-
-            #[cfg(feature = "tray")]
-            {
-                #[cfg(not(target_os = "linux"))]
-                if let Some(tray_icon) = self.tray.0.take() {
-                    self.tray_icon = Some((tray_icon)());
-                }
-
-                #[cfg(target_os = "macos")]
-                {
-                    use objc2_core_foundation::CFRunLoop;
-
-                    let rl = CFRunLoop::main().expect("Failed to run CFRunLoop");
-                    CFRunLoop::wake_up(&rl);
-                }
-            }
-
-            for window_config in self.windows_configs.drain(..) {
-                let app_window = AppWindow::new(
-                    window_config,
-                    active_event_loop,
-                    &self.proxy,
-                    &mut self.plugins,
-                    &mut self.font_collection,
-                    &self.font_manager,
-                    &self.fallback_fonts,
-                    self.gpu_resource_cache_limit,
-                    &mut self.graphics_context,
-                    &self.global_contexts,
-                );
-
-                self.proxy
-                    .send_event(NativeEvent::Window(NativeWindowEvent {
-                        window_id: app_window.window.id(),
-                        action: NativeWindowEventAction::PollRunner,
-                    }))
-                    .ok();
-
-                self.windows.insert(app_window.window.id(), app_window);
-            }
-            self.resumed = true;
-
-            subscribe_preferences(self.proxy.clone());
-
-            let _ = self
-                .proxy
-                .send_event(NativeEvent::Generic(NativeGenericEvent::PollFutures));
-        } else {
-            // [Android] Recreate the GraphicsDriver when the app gets brought into the foreground after being suspended,
-            // so we don't end up with a completely black surface with broken rendering.
-            let old_windows: Vec<_> = self.windows.drain().collect();
-            for (_, mut app_window) in old_windows {
-                let (new_driver, new_window) = GraphicsDriver::new(
-                    active_event_loop,
-                    app_window.window_attributes.clone(),
-                    self.gpu_resource_cache_limit,
-                    app_window.renderer,
-                    &mut self.graphics_context,
-                );
-
-                let new_id = new_window.id();
-                app_window.driver = new_driver;
-                app_window.window = new_window;
-                app_window.process_layout_on_next_render = true;
-                app_window.tree.layout.reset();
-
-                self.windows.insert(new_id, app_window);
-
-                self.proxy
-                    .send_event(NativeEvent::Window(NativeWindowEvent {
-                        window_id: new_id,
-                        action: NativeWindowEventAction::PollRunner,
-                    }))
-                    .ok();
-            }
+    fn update_control_flow(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.process_pending_updates(event_loop);
+        if !matches!(event_loop.control_flow(), ControlFlow::Poll) {
+            let deadline = self
+                .windows
+                .values()
+                .filter_map(|app| app.event_buffer.deadline())
+                .min();
+            event_loop.set_control_flow(match deadline {
+                Some(deadline) => ControlFlow::WaitUntil(deadline),
+                None => ControlFlow::Wait,
+            });
         }
     }
 
-    fn user_event(
+    fn process_window_event(
         &mut self,
-        active_event_loop: &winit::event_loop::ActiveEventLoop,
-        event: NativeEvent,
-    ) {
-        match event {
-            NativeEvent::Generic(NativeGenericEvent::RendererCallback(cb)) => {
-                let mut renderer_context = RendererContext {
-                    fallback_fonts: &mut self.fallback_fonts,
-                    active_event_loop,
-                    windows: &mut self.windows,
-                    global_contexts: &self.global_contexts,
-                    proxy: &mut self.proxy,
-                    plugins: &mut self.plugins,
-                    font_manager: &mut self.font_manager,
-                    font_collection: &mut self.font_collection,
-                    gpu_resource_cache_limit: self.gpu_resource_cache_limit,
-                    graphics_context: &mut self.graphics_context,
-                };
-                (cb)(&mut renderer_context);
-            }
-            NativeEvent::Generic(NativeGenericEvent::PollFutures) => {
-                let mut cx = std::task::Context::from_waker(&self.waker);
-                self.futures
-                    .retain_mut(|fut| fut.poll(&mut cx).is_pending());
-            }
-            NativeEvent::Preferences(prefs) => {
-                for app in self.windows.values_mut() {
-                    app.platform
-                        .accent_color
-                        .set_if_modified(prefs.accent_color);
-                }
-            }
-            #[cfg(feature = "tray")]
-            NativeEvent::Tray(NativeTrayEvent { action }) => {
-                let renderer_context = RendererContext {
-                    fallback_fonts: &mut self.fallback_fonts,
-                    active_event_loop,
-                    windows: &mut self.windows,
-                    global_contexts: &self.global_contexts,
-                    proxy: &mut self.proxy,
-                    plugins: &mut self.plugins,
-                    font_manager: &mut self.font_manager,
-                    font_collection: &mut self.font_collection,
-                    gpu_resource_cache_limit: self.gpu_resource_cache_limit,
-                    graphics_context: &mut self.graphics_context,
-                };
-                match action {
-                    NativeTrayEventAction::TrayEvent(icon_event) => {
-                        use crate::tray::TrayEvent;
-                        if let Some(tray_handler) = &mut self.tray.1 {
-                            (tray_handler)(TrayEvent::Icon(icon_event), renderer_context)
-                        }
-                    }
-                    NativeTrayEventAction::MenuEvent(menu_event) => {
-                        use crate::tray::TrayEvent;
-                        if let Some(tray_handler) = &mut self.tray.1 {
-                            (tray_handler)(TrayEvent::Menu(menu_event), renderer_context)
-                        }
-                    }
-                    NativeTrayEventAction::LaunchWindow(data) => {
-                        let window_config = data
-                            .0
-                            .downcast::<WindowConfig>()
-                            .expect("Expected WindowConfig");
-                        let app_window = AppWindow::new(
-                            *window_config,
-                            active_event_loop,
-                            &self.proxy,
-                            &mut self.plugins,
-                            &mut self.font_collection,
-                            &self.font_manager,
-                            &self.fallback_fonts,
-                            self.gpu_resource_cache_limit,
-                            &mut self.graphics_context,
-                            &self.global_contexts,
-                        );
-
-                        self.proxy
-                            .send_event(NativeEvent::Window(NativeWindowEvent {
-                                window_id: app_window.window.id(),
-                                action: NativeWindowEventAction::PollRunner,
-                            }))
-                            .ok();
-
-                        self.windows.insert(app_window.window.id(), app_window);
-                    }
-                }
-            }
-            #[cfg(feature = "menu")]
-            NativeEvent::Menu(menu_event) => {
-                // Tray menus share muda's global event stream — with both features on,
-                // both handlers see every event and match their own item ids.
-                #[cfg(feature = "tray")]
-                if let Some(tray_handler) = &mut self.tray.1 {
-                    let renderer_context = RendererContext {
-                        fallback_fonts: &mut self.fallback_fonts,
-                        active_event_loop,
-                        windows: &mut self.windows,
-                        global_contexts: &self.global_contexts,
-                        proxy: &mut self.proxy,
-                        plugins: &mut self.plugins,
-                        font_manager: &mut self.font_manager,
-                        font_collection: &mut self.font_collection,
-                        gpu_resource_cache_limit: self.gpu_resource_cache_limit,
-                        graphics_context: &mut self.graphics_context,
-                    };
-                    (tray_handler)(
-                        crate::tray::TrayEvent::Menu(menu_event.clone()),
-                        renderer_context,
-                    );
-                }
-                if let Some(menu_handler) = &mut self.menu.1 {
-                    let renderer_context = RendererContext {
-                        fallback_fonts: &mut self.fallback_fonts,
-                        active_event_loop,
-                        windows: &mut self.windows,
-                        global_contexts: &self.global_contexts,
-                        proxy: &mut self.proxy,
-                        plugins: &mut self.plugins,
-                        font_manager: &mut self.font_manager,
-                        font_collection: &mut self.font_collection,
-                        gpu_resource_cache_limit: self.gpu_resource_cache_limit,
-                        graphics_context: &mut self.graphics_context,
-                    };
-                    (menu_handler)(menu_event, renderer_context);
-                }
-            }
-            NativeEvent::Window(NativeWindowEvent {
-                action:
-                    NativeWindowEventAction::User(UserEvent::LoadFont {
-                        font_name,
-                        font_data,
-                    }),
-                ..
-            }) => {
-                let Some(typeface) = FontMgr::custom_empty()
-                    .unwrap_or_default()
-                    .new_from_data(SkData::new_copy(&font_data), None)
-                else {
-                    tracing::error!("Failed to load font {font_name}.");
-                    return;
-                };
-
-                register_font_typeface(&mut self.font_provider, font_name.as_ref(), typeface);
-                self.font_collection.clear_caches();
-
-                for app in self.windows.values_mut() {
-                    app.process_layout_on_next_render = true;
-                    app.tree.layout.reset();
-                    app.tree.text_cache.reset();
-                    app.window.request_redraw();
-                }
-            }
-            NativeEvent::Window(NativeWindowEvent { action, window_id }) => {
-                // The close request needs `&mut self` (it may remove the window), so it
-                // is handled before the per-window borrow below.
-                if matches!(action, NativeWindowEventAction::RequestClose) {
-                    self.process_close_request(window_id, active_event_loop);
-                    return;
-                }
-                if let Some(app) = &mut self.windows.get_mut(&window_id) {
-                    match action {
-                        NativeWindowEventAction::PollRunner => {
-                            let mut cx = std::task::Context::from_waker(&app.waker);
-
-                            #[cfg(feature = "hotreload")]
-                            let hotreload_triggered = app
-                                .hot_reload_pending
-                                .swap(false, std::sync::atomic::Ordering::AcqRel);
-
-                            #[cfg(feature = "hotreload")]
-                            if hotreload_triggered {
-                                app.runner.reload();
-                            }
-
-                            {
-                                let mut observer = self.plugins.tasks_poll_observer(
-                                    &app.window,
-                                    PluginHandle::new(&self.proxy),
-                                );
-                                let fut = std::pin::pin!(async {
-                                    select! {
-                                        events_chunk = app.events_receiver.next() => {
-                                            match events_chunk {
-                                                Some(EventsChunk::Processed(processed_events)) => {
-                                                    let events_executor_adapter = EventsExecutorAdapter {
-                                                        runner: &mut app.runner,
-                                                    };
-                                                    events_executor_adapter.run(&mut app.nodes_state, processed_events);
-                                                }
-                                                Some(EventsChunk::Batch(events)) => {
-                                                    for event in events {
-                                                        app.runner.handle_event(event.node_id, event.name, event.data, event.bubbles);
-                                                    }
-                                                }
-                                                _ => {}
-                                            }
-                                        },
-                                        _ = app.runner.handle_events_with(&mut observer).fuse() => {},
-                                    }
-                                });
-
-                                match fut.poll(&mut cx) {
-                                    std::task::Poll::Ready(_) => {
-                                        self.proxy
-                                            .send_event(NativeEvent::Window(NativeWindowEvent {
-                                                window_id: app.window.id(),
-                                                action: NativeWindowEventAction::PollRunner,
-                                            }))
-                                            .ok();
-                                    }
-                                    std::task::Poll::Pending => {}
-                                }
-                            }
-
-                            app.runner.handle_events_immediately_with(
-                                &mut self.plugins.tasks_poll_observer(
-                                    &app.window,
-                                    PluginHandle::new(&self.proxy),
-                                ),
-                            );
-                            self.plugins.send(
-                                PluginEvent::StartedUpdatingTree {
-                                    window: &app.window,
-                                    tree: &app.tree,
-                                },
-                                PluginHandle::new(&self.proxy),
-                            );
-                            let mutations = app.runner.sync_and_update();
-                            let scale_factor = app.effective_scale_factor() as f32;
-                            let result = app
-                                .runner
-                                .run_in(|| app.tree.apply_mutations(mutations, scale_factor));
-                            app.update_cursor_icon();
-                            if result.needs_render {
-                                app.process_layout_on_next_render = true;
-                                app.window.request_redraw();
-                            }
-                            #[cfg(feature = "hotreload")]
-                            if hotreload_triggered {
-                                // Hot-patches can change closure bodies and custom `ElementExt` impls
-                                // that `PartialEq` can't observe, so force a layout + redraw.
-                                app.process_layout_on_next_render = true;
-                                app.window.request_redraw();
-                            }
-                            if result.needs_accessibility {
-                                app.accessibility_tasks_for_next_render |=
-                                    AccessibilityTask::ProcessUpdate { mode: None };
-                                app.window.request_redraw();
-                            }
-                            if let Some(strategy) = result.auto_focus {
-                                self.proxy
-                                    .send_event(NativeEvent::Window(NativeWindowEvent {
-                                        window_id: app.window.id(),
-                                        action: NativeWindowEventAction::User(
-                                            UserEvent::FocusAccessibilityNode(strategy),
-                                        ),
-                                    }))
-                                    .ok();
-                            }
-                            self.plugins.send(
-                                PluginEvent::FinishedUpdatingTree {
-                                    window: &app.window,
-                                    tree: &app.tree,
-                                },
-                                PluginHandle::new(&self.proxy),
-                            );
-                            #[cfg(debug_assertions)]
-                            {
-                                tracing::info!("Updated app tree.");
-                                tracing::info!("{:#?}", app.tree);
-                                tracing::info!("{:#?}", app.runner);
-                            }
-                        }
-                        // Intercepted before the per-window borrow above.
-                        NativeWindowEventAction::RequestClose => {}
-                        #[cfg(feature = "accessibility")]
-                        NativeWindowEventAction::Accessibility(
-                            accesskit_winit::WindowEvent::AccessibilityDeactivated,
-                        ) => {
-                            app.screen_reader.set(false);
-                        }
-                        #[cfg(feature = "accessibility")]
-                        NativeWindowEventAction::Accessibility(
-                            accesskit_winit::WindowEvent::ActionRequested(_),
-                        ) => {}
-                        #[cfg(feature = "accessibility")]
-                        NativeWindowEventAction::Accessibility(
-                            accesskit_winit::WindowEvent::InitialTreeRequested,
-                        ) => {
-                            app.accessibility_tasks_for_next_render = AccessibilityTask::Init;
-                            app.window.request_redraw();
-                        }
-                        NativeWindowEventAction::User(user_event) => match user_event {
-                            UserEvent::RequestRedraw => {
-                                app.window.request_redraw();
-                            }
-                            UserEvent::FocusAccessibilityNode(strategy) => {
-                                let task = match strategy {
-                                    AccessibilityFocusStrategy::Backward(_)
-                                    | AccessibilityFocusStrategy::Forward(_) => {
-                                        AccessibilityTask::ProcessUpdate {
-                                            mode: Some(NavigationMode::Keyboard),
-                                        }
-                                    }
-                                    _ => AccessibilityTask::ProcessUpdate { mode: None },
-                                };
-                                if let AccessibilityFocusStrategy::Node(id) = &strategy {
-                                    app.platform.focused_accessibility_id.set_if_modified(*id);
-                                }
-                                app.tree.accessibility_diff.request_focus(strategy);
-                                app.accessibility_tasks_for_next_render |= task;
-                                app.window.request_redraw();
-                            }
-                            UserEvent::OpenUrl(url) => {
-                                if let Err(error) = open::that(&url) {
-                                    tracing::error!(%error, %url, "Failed to open URL");
-                                }
-                            }
-                            UserEvent::SetCustomScaleFactor(custom_scale_factor) => {
-                                app.set_custom_scale_factor(custom_scale_factor);
-                            }
-                            UserEvent::LoadFont { .. } => unreachable!(),
-                            UserEvent::Erased(data) => {
-                                let action = data
-                                    .0
-                                    .downcast::<NativeWindowErasedEventAction>()
-                                    .expect("Expected NativeWindowErasedEventAction");
-                                match *action {
-                                    NativeWindowErasedEventAction::LaunchWindow {
-                                        window_config,
-                                        ack,
-                                    } => {
-                                        let app_window = AppWindow::new(
-                                            *window_config,
-                                            active_event_loop,
-                                            &self.proxy,
-                                            &mut self.plugins,
-                                            &mut self.font_collection,
-                                            &self.font_manager,
-                                            &self.fallback_fonts,
-                                            self.gpu_resource_cache_limit,
-                                            &mut self.graphics_context,
-                                            &self.global_contexts,
-                                        );
-
-                                        let window_id = app_window.window.id();
-
-                                        let _ = self.proxy.send_event(NativeEvent::Window(
-                                            NativeWindowEvent {
-                                                window_id,
-                                                action: NativeWindowEventAction::PollRunner,
-                                            },
-                                        ));
-
-                                        self.windows.insert(window_id, app_window);
-                                        let _ = ack.send(window_id);
-                                    }
-                                    NativeWindowErasedEventAction::CloseWindow(window_id) => {
-                                        // Its fine to ignore if the window doesnt exist anymore
-                                        if let Some(app) = self.windows.remove(&window_id) {
-                                            self.plugins.send(
-                                                PluginEvent::WindowClosed {
-                                                    window: &app.window,
-                                                    tree: &app.tree,
-                                                },
-                                                PluginHandle::new(&self.proxy),
-                                            );
-                                        }
-                                        let has_windows = !self.windows.is_empty();
-
-                                        let has_tray = {
-                                            #[cfg(feature = "tray")]
-                                            {
-                                                self.tray.1.is_some()
-                                            }
-                                            #[cfg(not(feature = "tray"))]
-                                            {
-                                                false
-                                            }
-                                        };
-
-                                        // Only exit when there is no window and no tray
-                                        if !has_windows && !has_tray && self.exit_on_close {
-                                            active_event_loop.exit();
-                                        }
-                                    }
-                                    NativeWindowErasedEventAction::RendererCallback(cb) => {
-                                        let window_id = app.window.id();
-                                        let mut renderer_context = RendererContext {
-                                            fallback_fonts: &mut self.fallback_fonts,
-                                            active_event_loop,
-                                            windows: &mut self.windows,
-                                            global_contexts: &self.global_contexts,
-                                            proxy: &mut self.proxy,
-                                            plugins: &mut self.plugins,
-                                            font_manager: &mut self.font_manager,
-                                            font_collection: &mut self.font_collection,
-                                            gpu_resource_cache_limit: self.gpu_resource_cache_limit,
-                                            graphics_context: &mut self.graphics_context,
-                                        };
-                                        (cb)(window_id, &mut renderer_context);
-                                    }
-                                }
-                            }
-                        },
-                        NativeWindowEventAction::PlatformEvent(platform_event) => {
-                            app.process_platform_events(
-                                vec![platform_event],
-                                &mut self.plugins,
-                                PluginHandle::new(&self.proxy),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn window_event(
-        &mut self,
-        event_loop: &winit::event_loop::ActiveEventLoop,
+        event_loop: &dyn winit::event_loop::ActiveEventLoop,
         window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
     ) {
+        if let WindowEvent::DataTransferReceived { id, serial, value } = &event
+            && let Some(pending) = self.clipboard_reads.remove(serial)
+        {
+            let result = if pending.transfer == *id {
+                match pending.format.read(value.as_ref()) {
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        self.clipboard_reads.insert(*serial, pending);
+                        return;
+                    }
+                    result => result.map_err(|_| ClipboardError::FailedToRead),
+                }
+            } else {
+                Err(ClipboardError::FailedToRead)
+            };
+            let _ = pending.response.send(result);
+            return;
+        }
+
         let mut needs_recovery = false;
-        if let Some(app) = &mut self.windows.get_mut(&window_id) {
+        if let Some(app) = self.windows.get_mut(&window_id) {
+            self.plugins.send(
+                PluginEvent::WindowEvent {
+                    window: app.window.as_ref(),
+                    raw: &event,
+                    tree: &mut app.tree,
+                },
+                PluginHandle::new(&self.proxy),
+            );
+
             #[cfg(feature = "accessibility")]
-            app.accessibility_adapter.process_event(&app.window, &event);
+            app.process_accessibility_window_event(&event);
             match event {
+                WindowEvent::DragEntered { id, position } => {
+                    if let Some(position) = position {
+                        app.position = CursorPoint::new(position.x, position.y);
+                    }
+                    app.platform_drag.expire();
+                    let Ok(transfer) = event_loop.data_transfer(id) else {
+                        return;
+                    };
+                    let formats = [
+                        DataFormat::Files,
+                        DataFormat::Text,
+                        DataFormat::Html,
+                        DataFormat::Rtf,
+                        DataFormat::Image,
+                        DataFormat::Audio,
+                    ]
+                    .into_iter()
+                    .filter(|format| transfer.has_type(&format.to_type_hint()))
+                    .collect();
+                    let data = DragDataHandle::new(formats);
+                    app.platform_drag.incoming = Some(IncomingDrag {
+                        id,
+                        data,
+                        decision: None,
+                        accepted: None,
+                        dropped: false,
+                    });
+                    if let Some(event) = app.platform_drag.prepare_drag_over(app.position) {
+                        app.queue_platform_events(vec![event]);
+                    }
+                    self.process_pending_updates(event_loop);
+                }
+                WindowEvent::DragPosition { id, position, .. } => {
+                    app.position = CursorPoint::new(position.x, position.y);
+                    if !app
+                        .platform_drag
+                        .incoming
+                        .as_ref()
+                        .is_some_and(|incoming| incoming.id == id)
+                    {
+                        return;
+                    }
+                    if let Some(event) = app.platform_drag.prepare_drag_over(app.position) {
+                        app.queue_platform_events(vec![event]);
+                    }
+                    self.process_pending_updates(event_loop);
+                }
+                WindowEvent::DragDropped { id, .. } => {
+                    let Some(incoming) = app
+                        .platform_drag
+                        .incoming
+                        .as_mut()
+                        .filter(|incoming| incoming.id == id)
+                    else {
+                        return;
+                    };
+                    incoming.dropped = true;
+                    let target = incoming.accepted;
+                    let events = vec![
+                        PlatformEvent::Drag {
+                            name: DragEventName::Drop,
+                            cursor: app.position,
+                            data: incoming.data.clone(),
+                            decision: None,
+                            target,
+                        },
+                        PlatformEvent::Drag {
+                            name: DragEventName::Leave,
+                            cursor: app.position,
+                            data: incoming.data.clone(),
+                            decision: None,
+                            target: None,
+                        },
+                    ];
+                    app.queue_platform_events(events);
+                    self.process_pending_updates(event_loop);
+                }
+                WindowEvent::DragLeft { id } => {
+                    let Some(incoming) = app
+                        .platform_drag
+                        .incoming
+                        .as_ref()
+                        .filter(|incoming| incoming.id == id && !incoming.dropped)
+                    else {
+                        return;
+                    };
+                    let event = PlatformEvent::Drag {
+                        name: DragEventName::Leave,
+                        cursor: app.position,
+                        data: incoming.data.clone(),
+                        decision: None,
+                        target: None,
+                    };
+                    app.platform_drag.expire();
+                    app.queue_platform_events(vec![event]);
+                    self.process_pending_updates(event_loop);
+                }
+                WindowEvent::DataTransferReceived { id, serial, value } => {
+                    app.platform_drag.receive(id, serial, value.as_ref());
+                }
+                WindowEvent::OutgoingDragDropped { id, action } => {
+                    let Some((_, response)) = app
+                        .platform_drag
+                        .outgoing
+                        .take_if(|(outgoing_id, _)| *outgoing_id == id)
+                    else {
+                        return;
+                    };
+                    let action = action.and_then(|action| match action {
+                        DndAction::Copy => Some(DropAction::Copy),
+                        DndAction::Move => Some(DropAction::Move),
+                        DndAction::Link => Some(DropAction::Link),
+                        _ => None,
+                    });
+                    let _ = response.send(Ok(PlatformDragResult::Dropped(action)));
+                    app.mouse_state = ElementState::Released;
+                    app.queue_platform_events(vec![PlatformEvent::PointerCancel {
+                        cursor: app.position,
+                    }]);
+                }
+                WindowEvent::OutgoingDragCanceled { id } => {
+                    let Some((_, response)) = app
+                        .platform_drag
+                        .outgoing
+                        .take_if(|(outgoing_id, _)| *outgoing_id == id)
+                    else {
+                        return;
+                    };
+                    let _ = response.send(Ok(PlatformDragResult::Cancelled));
+                    app.mouse_state = ElementState::Released;
+                    app.queue_platform_events(vec![PlatformEvent::PointerCancel {
+                        cursor: app.position,
+                    }]);
+                }
                 WindowEvent::ThemeChanged(theme) => {
                     app.platform.preferred_theme.set(match theme {
                         Theme::Light => PreferredTheme::Light,
@@ -1014,77 +1192,35 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                 modifiers,
                             })
                             .collect();
-                        app.process_platform_events(
-                            platform_events,
-                            &mut self.plugins,
-                            PluginHandle::new(&self.proxy),
-                        );
+                        app.queue_platform_events(platform_events);
                     }
                 }
                 WindowEvent::RedrawRequested => {
+                    if app.driver.is_none() {
+                        return;
+                    }
+
                     let scale_factor = app.effective_scale_factor();
                     hotpath::measure_block!("RedrawRequested", {
-                        if app.process_layout_on_next_render {
-                            self.plugins.send(
-                                PluginEvent::StartedMeasuringLayout {
-                                    window: &app.window,
-                                    tree: &app.tree,
-                                },
-                                PluginHandle::new(&self.proxy),
-                            );
-                            let size: Size2D = (
-                                app.window.inner_size().width as f32,
-                                app.window.inner_size().height as f32,
-                            )
-                                .into();
+                        app.measure_layout(
+                            &mut self.font_collection,
+                            &self.font_manager,
+                            &self.fallback_fonts,
+                            &mut self.plugins,
+                            PluginHandle::new(&self.proxy),
+                        );
 
-                            app.tree.measure_layout(
-                                size,
-                                &mut self.font_collection,
-                                &self.font_manager,
-                                &app.events_sender,
-                                &mut app.nodes_state,
-                                scale_factor,
-                                &self.fallback_fonts,
-                            );
-                            // Store logical units — the same space as the sized-event areas
-                            // (which divide by this scale factor), so userland can compare them.
-                            app.platform
-                                .root_size
-                                .set_if_modified(size / scale_factor as f32);
-                            app.process_layout_on_next_render = false;
-                            self.plugins.send(
-                                PluginEvent::FinishedMeasuringLayout {
-                                    window: &app.window,
-                                    tree: &app.tree,
-                                },
-                                PluginHandle::new(&self.proxy),
-                            );
-
-                            if std::mem::take(&mut app.send_mouse_move_on_next_layout)
-                                && app.cursor_in_window
-                            {
-                                app.process_platform_events(
-                                    vec![PlatformEvent::Mouse {
-                                        name: MouseEventName::MouseMove,
-                                        cursor: app.position,
-                                        button: None,
-                                        modifiers: winit_mappings::map_winit_modifiers(app.modifiers_state),
-                                    }],
-                                    &mut self.plugins,
-                                    PluginHandle::new(&self.proxy),
-                                );
-                            }
-                        }
-
-                        let resource_cache = app.driver.resource_cache_usage();
-                        let present_result = app.driver.present(
-                            app.window.inner_size().cast(),
-                            &app.window,
+                        let Some(driver) = app.driver.as_mut() else {
+                            return;
+                        };
+                        let resource_cache = driver.resource_cache_usage();
+                        let present_result = driver.present(
+                            app.window.surface_size().cast(),
+                            app.window.as_ref(),
                             |surface| {
                                 self.plugins.send(
                                     PluginEvent::BeforeRender {
-                                        window: &app.window,
+                                        window: app.window.as_ref(),
                                         canvas: surface.canvas(),
                                         font_collection: &self.font_collection,
                                         tree: &app.tree,
@@ -1117,7 +1253,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
 
                                 self.plugins.send(
                                     PluginEvent::AfterRender {
-                                        window: &app.window,
+                                        window: app.window.as_ref(),
                                         canvas: surface.canvas(),
                                         font_collection: &self.font_collection,
                                         tree: &app.tree,
@@ -1133,7 +1269,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
 
                                 self.plugins.send(
                                     PluginEvent::BeforePresenting {
-                                        window: &app.window,
+                                        window: app.window.as_ref(),
                                         font_collection: &self.font_collection,
                                         tree: &app.tree,
                                     },
@@ -1150,7 +1286,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
 
                         self.plugins.send(
                             PluginEvent::AfterPresenting {
-                                window: &app.window,
+                                window: app.window.as_ref(),
                                 font_collection: &self.font_collection,
                                 tree: &app.tree,
                             },
@@ -1159,7 +1295,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
 
                         self.plugins.send(
                             PluginEvent::BeforeAccessibility {
-                                window: &app.window,
+                                window: app.window.as_ref(),
                                 font_collection: &self.font_collection,
                                 tree: &app.tree,
                             },
@@ -1185,13 +1321,15 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                                     &app.tree,
                                     &title,
                                 );
-                                app.window.set_ime_allowed(is_ime_role(focused_node.role()));
+                                let ime_allowed = is_ime_role(focused_node.role());
                                 app.platform
                                     .focused_accessibility_node
                                     .set_if_modified(focused_node);
 
                                 let area = layout_node.visible_area();
-                                app.window.set_ime_cursor_area(
+                                crate::integration::update_ime(
+                                    app.window.as_ref(),
+                                    ime_allowed,
                                     LogicalPosition::new(area.min_x(), area.min_y()),
                                     LogicalSize::new(area.width(), area.height()),
                                 );
@@ -1207,7 +1345,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
 
                         self.plugins.send(
                             PluginEvent::AfterAccessibility {
-                                window: &app.window,
+                                window: app.window.as_ref(),
                                 font_collection: &self.font_collection,
                                 tree: &app.tree,
                             },
@@ -1218,7 +1356,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
 
                         self.plugins.send(
                             PluginEvent::AfterRedraw {
-                                window: &app.window,
+                                window: app.window.as_ref(),
                                 font_collection: &self.font_collection,
                                 tree: &app.tree,
                             },
@@ -1226,17 +1364,18 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                         );
                     });
                 }
-                WindowEvent::Resized(size) => {
-                    if let Err(error) = app.driver.resize(size) {
+                WindowEvent::SurfaceResized(size) => {
+                    if let Some(driver) = &mut app.driver
+                        && let Err(error) = driver.resize(size)
+                    {
                         tracing::warn!(
                             "Graphics driver lost while resizing ({error:?}), rebuilding on the same window"
                         );
                         needs_recovery = true;
                     }
 
-                    // Filling the window (macOS zoom) or entering fullscreen *is* a resize,
-                    // and winit has no event of its own for either, so this is where both
-                    // flags are refreshed for userland.
+                    // Maximizing (macOS zoom) or entering fullscreen is a resize, and winit has
+                    // no event of its own for either, so this is where both flags are refreshed.
                     app.platform
                         .is_maximized
                         .set_if_modified(app.window.is_maximized());
@@ -1250,8 +1389,8 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     app.tree.layout.clear_dirty();
                     app.tree.layout.invalidate(NodeId::ROOT);
 
-                    // AppKit resets the traffic-light positions on resize and
-                    // fullscreen transitions (which also emit Resized).
+                    // AppKit resets the traffic-light positions on resize and fullscreen
+                    // transitions (which also resize).
                     #[cfg(target_os = "macos")]
                     if let Some(traffic_lights) = &app.traffic_lights {
                         traffic_lights.reapply();
@@ -1262,7 +1401,43 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     app.set_window_position(position);
                 }
 
-                WindowEvent::MouseInput { state, button, .. } => {
+                WindowEvent::PointerButton {
+                    state,
+                    position,
+                    button: ButtonSource::Touch { finger_id, force },
+                    ..
+                } => {
+                    let finger_id = finger_id.into_raw() as u64;
+                    app.position = CursorPoint::from((position.x, position.y));
+                    let phase = if state.is_pressed() {
+                        app.active_touches.insert(finger_id, app.position);
+                        TouchPhase::Started
+                    } else {
+                        app.active_touches.remove(&finger_id);
+                        TouchPhase::Ended
+                    };
+                    app.queue_platform_events(vec![PlatformEvent::Touch {
+                        name: if state.is_pressed() {
+                            TouchEventName::TouchStart
+                        } else {
+                            TouchEventName::TouchEnd
+                        },
+                        location: app.position,
+                        finger_id,
+                        phase: map_winit_touch_phase(phase),
+                        force: force.map(map_winit_touch_force),
+                    }]);
+                }
+                WindowEvent::PointerButton {
+                    state,
+                    button,
+                    position,
+                    ..
+                } => {
+                    let Some(button) = button.mouse_button() else {
+                        return;
+                    };
+                    app.position = CursorPoint::from((position.x, position.y));
                     app.mouse_state = state;
                     app.platform
                         .navigation_mode
@@ -1273,16 +1448,12 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                     } else {
                         MouseEventName::MouseUp
                     };
-                    app.process_platform_events(
-                        vec![PlatformEvent::Mouse {
-                            name,
-                            cursor: (app.position.x, app.position.y).into(),
-                            button: Some(map_winit_mouse_button(button)),
-                            modifiers: winit_mappings::map_winit_modifiers(app.modifiers_state),
-                        }],
-                        &mut self.plugins,
-                        PluginHandle::new(&self.proxy),
-                    );
+                    app.queue_platform_events(vec![PlatformEvent::Mouse {
+                        name,
+                        cursor: (app.position.x, app.position.y).into(),
+                        button: Some(map_winit_mouse_button(button)),
+                        modifiers: winit_mappings::map_winit_modifiers(app.modifiers_state),
+                    }]);
                 }
 
                 WindowEvent::KeyboardInput {
@@ -1300,7 +1471,8 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                         ElementState::Released => KeyboardEventName::KeyUp,
                     };
                     let key = winit_mappings::map_winit_key(&event.logical_key);
-                    let code = winit_mappings::map_winit_physical_key(&event.physical_key);
+                    let code = event.physical_key.into();
+
                     app.pressed_keys
                         .retain(|(_, pressed_code)| *pressed_code != code);
                     if event.state.is_pressed() {
@@ -1320,7 +1492,7 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
 
                     self.plugins.send(
                         PluginEvent::KeyboardInput {
-                            window: &app.window,
+                            window: app.window.as_ref(),
                             key: key.clone(),
                             code,
                             modifiers,
@@ -1329,198 +1501,140 @@ impl ApplicationHandler<NativeEvent> for WinitRenderer {
                         PluginHandle::new(&self.proxy),
                     );
 
-                    app.process_platform_events(
-                        vec![PlatformEvent::Keyboard {
-                            name,
-                            key,
-                            code,
-                            modifiers,
-                        }],
-                        &mut self.plugins,
-                        PluginHandle::new(&self.proxy),
-                    );
+                    app.queue_platform_events(vec![PlatformEvent::Keyboard {
+                        name,
+                        key,
+                        code,
+                        modifiers,
+                    }]);
                 }
 
                 WindowEvent::MouseWheel { delta, phase, .. } => {
                     const WHEEL_SPEED_MODIFIER: f64 = WheelSource::LINE_SIZE;
                     const TOUCHPAD_SPEED_MODIFIER: f64 = 2.0;
 
-                    if TouchPhase::Moved == phase {
-                        let (delta_x, delta_y, source) = match delta {
-                            MouseScrollDelta::LineDelta(x, y) => (
-                                x as f64 * WHEEL_SPEED_MODIFIER,
-                                y as f64 * WHEEL_SPEED_MODIFIER,
-                                WheelSource::Line,
-                            ),
-                            MouseScrollDelta::PixelDelta(position) => (
-                                position.x * TOUCHPAD_SPEED_MODIFIER,
-                                position.y * TOUCHPAD_SPEED_MODIFIER,
-                                WheelSource::Pixel,
-                            ),
-                        };
+                    let (delta_x, delta_y, source) = match delta {
+                        MouseScrollDelta::LineDelta(x, y) => (
+                            x as f64 * WHEEL_SPEED_MODIFIER,
+                            y as f64 * WHEEL_SPEED_MODIFIER,
+                            WheelSource::Line,
+                        ),
+                        MouseScrollDelta::PixelDelta(position) => (
+                            position.x * TOUCHPAD_SPEED_MODIFIER,
+                            position.y * TOUCHPAD_SPEED_MODIFIER,
+                            WheelSource::Pixel,
+                        ),
+                        _ => return,
+                    };
 
-                        app.process_platform_events(
-                            vec![PlatformEvent::Wheel {
-                                name: WheelEventName::Wheel,
-                                scroll: (delta_x, delta_y).into(),
-                                cursor: app.position,
-                                source,
-                                timestamp: Instant::now(),
-                            }],
-                            &mut self.plugins,
-                            PluginHandle::new(&self.proxy),
-                        );
-                    }
+                    app.queue_platform_events(vec![PlatformEvent::Wheel {
+                        name: WheelEventName::Wheel,
+                        scroll: (delta_x, delta_y).into(),
+                        cursor: app.position,
+                        source,
+                        timestamp: Instant::now(),
+                        phase: map_winit_touch_phase(phase),
+                    }]);
                 }
 
-                WindowEvent::CursorLeft { .. } => {
+                WindowEvent::PointerLeft {
+                    kind: PointerKind::Touch(finger_id),
+                    ..
+                } => {
+                    let finger_id = finger_id.into_raw() as u64;
+                    if let Some(position) = app.active_touches.remove(&finger_id) {
+                        app.queue_platform_events(vec![PlatformEvent::Touch {
+                            name: TouchEventName::TouchCancel,
+                            location: position,
+                            finger_id,
+                            phase: map_winit_touch_phase(TouchPhase::Cancelled),
+                            force: None,
+                        }]);
+                    }
+                }
+                WindowEvent::PointerLeft { .. } => {
                     if std::mem::replace(&mut app.mouse_state, ElementState::Released)
                         == ElementState::Released
                     {
                         app.cursor_in_window = false;
-                        app.process_platform_events(
-                            vec![PlatformEvent::PointerExit {
-                                cursor: app.position,
-                            }],
-                            &mut self.plugins,
-                            PluginHandle::new(&self.proxy),
-                        );
+                        app.queue_platform_events(vec![PlatformEvent::PointerExit {
+                            cursor: app.position,
+                        }]);
                     }
                 }
-                WindowEvent::CursorMoved { position, .. } => {
+                WindowEvent::PointerMoved {
+                    position,
+                    source: PointerSource::Touch { finger_id, force },
+                    ..
+                } => {
+                    let finger_id = finger_id.into_raw() as u64;
+                    app.position = CursorPoint::from((position.x, position.y));
+                    app.active_touches.insert(finger_id, app.position);
+                    app.queue_platform_events(vec![PlatformEvent::Touch {
+                        name: TouchEventName::TouchMove,
+                        location: app.position,
+                        finger_id,
+                        phase: map_winit_touch_phase(TouchPhase::Moved),
+                        force: force.map(map_winit_touch_force),
+                    }]);
+                }
+                WindowEvent::PointerMoved { position, .. } => {
                     app.position = CursorPoint::from((position.x, position.y));
                     app.cursor_in_window = true;
 
-                    let mut platform_events = vec![PlatformEvent::Mouse {
+                    app.queue_platform_events(vec![PlatformEvent::Mouse {
                         name: MouseEventName::MouseMove,
                         cursor: app.position,
                         button: None,
                         modifiers: winit_mappings::map_winit_modifiers(app.modifiers_state),
-                    }];
-
-                    if !app.dropped_file_paths.is_empty() {
-                        platform_events.push(PlatformEvent::File {
-                            name: FileEventName::FileDrop,
-                            file_paths: app.dropped_file_paths.drain(..).collect(),
-                            cursor: app.position,
-                        });
-                    }
-
-                    app.process_platform_events(
-                        platform_events,
-                        &mut self.plugins,
-                        PluginHandle::new(&self.proxy),
-                    );
+                    }]);
                 }
 
-                WindowEvent::Touch(Touch {
-                    location,
-                    phase,
-                    id,
-                    force,
-                    ..
-                }) => {
-                    app.position = CursorPoint::from((location.x, location.y));
-
-                    let name = match phase {
-                        TouchPhase::Cancelled => TouchEventName::TouchCancel,
-                        TouchPhase::Ended => TouchEventName::TouchEnd,
-                        TouchPhase::Moved => TouchEventName::TouchMove,
-                        TouchPhase::Started => TouchEventName::TouchStart,
-                    };
-
-                    app.process_platform_events(
-                        vec![PlatformEvent::Touch {
-                            name,
-                            location: app.position,
-                            finger_id: id,
-                            phase: map_winit_touch_phase(phase),
-                            force: force.map(map_winit_touch_force),
-                        }],
-                        &mut self.plugins,
-                        PluginHandle::new(&self.proxy),
-                    );
-                }
                 WindowEvent::Ime(Ime::Commit(text)) => {
-                    app.process_platform_events(
-                        vec![PlatformEvent::Keyboard {
-                            name: KeyboardEventName::KeyDown,
-                            key: keyboard_types::Key::Character(text),
-                            code: keyboard_types::Code::Unidentified,
-                            modifiers: winit_mappings::map_winit_modifiers(app.modifiers_state),
-                        }],
-                        &mut self.plugins,
-                        PluginHandle::new(&self.proxy),
-                    );
+                    app.queue_platform_events(vec![PlatformEvent::Keyboard {
+                        name: KeyboardEventName::KeyDown,
+                        key: keyboard_types::Key::Character(text),
+                        code: keyboard_types::Code::Unidentified,
+                        modifiers: winit_mappings::map_winit_modifiers(app.modifiers_state),
+                    }]);
                 }
                 WindowEvent::Ime(Ime::Preedit(text, pos)) => {
-                    app.process_platform_events(
-                        vec![PlatformEvent::ImePreedit {
-                            name: ImeEventName::Preedit,
-                            text,
-                            cursor: pos,
-                        }],
-                        &mut self.plugins,
-                        PluginHandle::new(&self.proxy),
-                    );
-                }
-                WindowEvent::DroppedFile(file_path) => {
-                    app.dropped_file_paths.push(file_path);
-                }
-                WindowEvent::HoveredFile(file_path) => {
-                    app.process_platform_events(
-                        vec![PlatformEvent::File {
-                            name: FileEventName::FileHover,
-                            file_paths: vec![file_path],
-                            cursor: app.position,
-                        }],
-                        &mut self.plugins,
-                        PluginHandle::new(&self.proxy),
-                    );
-                }
-                WindowEvent::HoveredFileCancelled => {
-                    app.process_platform_events(
-                        vec![PlatformEvent::File {
-                            name: FileEventName::FileHoverCancelled,
-                            file_paths: Vec::new(),
-                            cursor: app.position,
-                        }],
-                        &mut self.plugins,
-                        PluginHandle::new(&self.proxy),
-                    );
+                    app.queue_platform_events(vec![PlatformEvent::ImePreedit {
+                        name: ImeEventName::Preedit,
+                        text,
+                        cursor: pos,
+                    }]);
                 }
                 _ => {}
             }
         }
 
-        // Rebuild on the same window.
-        if needs_recovery && let Some(mut app) = self.windows.remove(&window_id) {
-            // Drop the lost driver first to release its GPU surface.
-            drop(app.driver);
-            app.driver = GraphicsDriver::recover_reusing_window(
+        if needs_recovery && let Some(app) = self.windows.get_mut(&window_id) {
+            drop(app.driver.take());
+            let driver = GraphicsDriver::recover_reusing_window(
                 event_loop,
-                &app.window,
+                app.window.as_ref(),
                 self.gpu_resource_cache_limit,
-                app.window_attributes.transparent,
+                app.window_attributes.transparent(),
             );
-            tracing::info!("Recovered onto the {} driver", app.driver.name());
+            tracing::info!("Recovered onto the {} driver", driver.name());
             self.plugins.send(
                 PluginEvent::GraphicsDriverChanged {
-                    window: &app.window,
-                    graphics_driver: app.driver.name(),
-                    gpu_name: app.driver.gpu_name(),
+                    window: app.window.as_ref(),
+                    graphics_driver: driver.name(),
+                    gpu_name: driver.gpu_name(),
                 },
                 PluginHandle::new(&self.proxy),
             );
+            app.driver = Some(driver);
             app.window.request_redraw();
-            self.windows.insert(window_id, app);
         }
     }
 }
 
-fn subscribe_preferences(proxy: EventLoopProxy<NativeEvent>) {
+fn subscribe_preferences(proxy: RendererSender) {
     let subscription = mundy::Preferences::subscribe(mundy::Interest::AccentColor, move |prefs| {
-        let _ = proxy.send_event(NativeEvent::Preferences(prefs));
+        let _ = proxy.send_message(RendererMessage::Preferences(prefs));
     });
     std::mem::forget(subscription);
 }

@@ -186,6 +186,7 @@ impl BrowserState {
             cursor: event.mouse.position(),
             source,
             timestamp: Instant::now(),
+            phase: TouchPhase::Moved,
         });
 
         true

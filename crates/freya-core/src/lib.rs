@@ -1,7 +1,9 @@
 pub mod accessibility;
 pub mod animation_clock;
+pub mod command;
 pub mod current_context;
 pub mod data;
+pub mod data_transfer;
 pub mod debug;
 pub mod diff_key;
 pub mod element;
@@ -10,18 +12,16 @@ pub mod event_handler;
 pub mod events;
 pub mod events_combos;
 pub mod extended_hashmap;
-pub mod fifo_cache;
 pub mod helpers;
 pub mod hooks;
 pub mod io;
 pub mod layers;
 pub mod lifecycle;
-pub mod lru_cache;
 pub mod metrics;
 pub mod node_id;
-pub mod notify;
 pub mod path_element;
 pub mod platform;
+pub mod platform_drag;
 pub mod reactive_context;
 pub mod render_pipeline;
 pub mod rendering_ticker;
@@ -32,7 +32,11 @@ pub mod style;
 pub mod text_cache;
 pub mod tree;
 pub mod tree_layout_adapter;
-pub mod user_event;
+
+pub use tiny_cache::{
+    fifo_cache,
+    lru_cache,
+};
 
 #[cfg(feature = "hotreload")]
 pub mod hotreload {
@@ -63,7 +67,12 @@ pub mod prelude {
             screen_reader::*,
         },
         animation_clock::AnimationClock,
+        command::{
+            AppCommand,
+            WindowCommand,
+        },
         data::*,
+        data_transfer::*,
         debug::*,
         diff_key::DiffKey,
         element::{
@@ -72,6 +81,7 @@ pub mod prelude {
             ComponentKey,
             ComponentOwned,
             Element,
+            ElementChildren,
             EventHandlers,
             IntoElement,
             RenderContext,
@@ -123,17 +133,21 @@ pub mod prelude {
         lifecycle::{
             base::*,
             context::*,
+            derived::*,
             effect::*,
             future_task::*,
+            global_context::*,
             memo::*,
             reactive::*,
             readable::*,
             state::*,
             task::*,
             writable::*,
+            writable_setter::*,
             writable_utils::*,
         },
         platform::*,
+        platform_drag::*,
         reactive_context::ReactiveContext,
         rendering_ticker::RenderingTicker,
         scope_id::ScopeId,
@@ -150,6 +164,11 @@ pub mod prelude {
             font_width::*,
             gradient::*,
             letter_spacing::*,
+            render_callback::{
+                RenderCallback,
+                RenderContext as FillRenderContext,
+                RenderTarget,
+            },
             scale::*,
             shader::*,
             shadow::*,
@@ -161,7 +180,6 @@ pub mod prelude {
             transform_origin::*,
             vertical_align::*,
         },
-        user_event::UserEvent,
     };
 }
 
@@ -179,8 +197,13 @@ pub mod integration {
             screen_reader::*,
             tree::*,
         },
-        animation_clock::AnimationClock,
+        animation_clock::{
+            AnimationClock,
+            New,
+        },
+        command::*,
         data::*,
+        data_transfer::*,
         element::*,
         elements::extensions::*,
         events::{
@@ -192,12 +215,13 @@ pub mod integration {
             platform::*,
         },
         lifecycle::{
-            context::GlobalContexts,
+            global_context::GlobalContexts,
             state::State,
             writable_utils::WritableUtils,
         },
         node_id::NodeId,
         platform::*,
+        platform_drag::*,
         render_pipeline::RenderPipeline,
         rendering_ticker::*,
         runner::{
@@ -213,6 +237,5 @@ pub mod integration {
             DiffModifies,
             Tree,
         },
-        user_event::*,
     };
 }

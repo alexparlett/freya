@@ -1,9 +1,13 @@
 name: Typing errors
 
 on:
-  push: {}
+  push:
+    branches: [ "main" ]
   pull_request: {}
   workflow_dispatch: {}
+
+permissions:
+  contents: read
 
 jobs:
   spelling:
